@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NovaPulse — Swarm Simulation Engine</title>
+  <style>
+    /* ── Reset ──────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    /* ── Root & body ────────────────────────────────────── */
+    :root {
+      --cyan:    #00ffe7;
+      --crimson: #ff2d55;
+      --blue:    #00cfff;
+      --dim:     #0a0a12;
+      --hud-bg:  rgba(0, 0, 0, 0.55);
+      --hud-border: rgba(0, 255, 231, 0.18);
+      --font:    'Courier New', Courier, monospace;
+    }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: var(--dim);
+    }
+
+    /* ── Canvas ─────────────────────────────────────────── */
+    #sim-canvas {
+      display: block;
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+    }
+
+    /* ── Scanline overlay ───────────────────────────────── */
+    #scanline-overlay {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 10;
+      background: repeating-linear-gradient(
+        to bottom,
+        transparent 0px,
+        transparent 3px,
+        rgba(0, 0, 0, 0.08) 3px,
+        rgba(0, 0, 0, 0.08) 4px
+      );
+      animation: flicker 8s step-end infinite;
+    }
+
+    @keyframes flicker {
+      0%, 95%, 100% { opacity: 1; }
+      96%           { opacity: 0.82; }
+      97%           { opacity: 1; }
+      98%           { opacity: 0.88; }
+      99%           { opacity: 1; }
+    }
+
+    /* ── Vignette ───────────────────────────────────────── */
+    #vignette {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 11;
+      background: radial-gradient(
+        ellipse at center,
+        transparent 55%,
+        rgba(0, 0, 0, 0.72) 100%
+      );
+    }
+
+    /* ── HUD overlay container ──────────────────────────── */
+    #hud-overlay {
+      position: fixed;
+      top: 18px;
+      left: 18px;
+      z-index: 20;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      pointer-events: none;
+    }
+
+    /* ── HUD panel ──────────────────────────────────────── */
+    .hud-panel {
+      background: var(--hud-bg);
+      border: 1px solid var(--hud-border);
+      border-radius: 4px;
+      padding: 10px 16px;
+      backdrop-filter: blur(6px);
+      -webkit-backdrop-filter: blur(6px);
+      min-width: 210px;
+    }
+
+    .hud-title {
+      font-family: var(--font);
+      font-size: 9px;
+      font-weight: bold;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: var(--cyan);
+      margin-bottom: 6px;
+      opacity: 0.7;
+    }
+
+    .hud-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      font-family: var(--font);
+      font-size: 11px;
+      color: rgba(255, 255, 255, 0.55);
+      padding: 1px 0;
+    }
+
+    .hud-row span.val {
+      color: var(--cyan);
+      font-size: 13px;
+      font-weight: bold;
+      letter-spacing: 0.05em;
+    }
+
+    .hud-row span.val.crimson { color: var(--crimson); }
+    .hud-row span.val.blue    { color: var(--blue); }
+
+    /* ── Engine badge ───────────────────────────────────── */
+    #engine-badge {
+      position: fixed;
+      bottom: 18px;
+      right: 22px;
+      z-index: 20;
+      font-family: var(--font);
+      font-size: 9px;
+      letter-spacing: 0.18em;
+      color: rgba(0, 255, 231, 0.22);
+      pointer-events: none;
+      text-transform: uppercase;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Primary simulation surface -->
+  <canvas id="sim-canvas"></canvas>
+
+  <!-- CRT scanline illusion -->
+  <div id="scanline-overlay" aria-hidden="true"></div>
+
+  <!-- Edge vignette -->
+  <div id="vignette" aria-hidden="true"></div>
+
+  <!-- Floating HUD -->
+  <div id="hud-overlay" role="status" aria-live="polite">
+    <div class="hud-panel">
+      <div class="hud-title">■ NovaPulse Engine</div>
+      <div class="hud-row">
+        <span>FPS</span>
+        <span class="val" id="hud-fps">—</span>
+      </div>
+      <div class="hud-row">
+        <span>TICK ms</span>
+        <span class="val" id="hud-tick">—</span>
+      </div>
+      <div class="hud-row">
+        <span>ENTITIES</span>
+        <span class="val" id="hud-entities">—</span>
+      </div>
+    </div>
+    <div class="hud-panel">
+      <div class="hud-title">▸ Swarm Status</div>
+      <div class="hud-row">
+        <span>◈ BLUE</span>
+        <span class="val blue" id="hud-blue">—</span>
+      </div>
+      <div class="hud-row">
+        <span>◈ CRIMSON</span>
+        <span class="val crimson" id="hud-crimson">—</span>
+      </div>
+      <div class="hud-row">
+        <span>SIM TIME</span>
+        <span class="val" id="hud-simtime">—</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Engine watermark -->
+  <div id="engine-badge">NOVAPULSE v1.0 · Phase 1</div>
+
+  <!-- Entrypoint (ES module) -->
+  <script type="module" src="src/main.js"></script>
+
+</body>
+</html>

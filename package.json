@@ -1,0 +1,14 @@
+{
+  "name": "nova-pulse",
+  "version": "1.0.0",
+  "description": "High-performance 2D Canvas & Autonomous Swarm Simulation Engine",
+  "type": "module",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "npx serve . -p 3000",
+    "test": "node tests/engine.test.js"
+  },
+  "keywords": ["simulation", "canvas", "swarm", "ecs", "game-engine"],
+  "author": "NovaPulse",
+  "license": "MIT"
+}

@@ -1,0 +1,41 @@
+# Environment & Secrets
+.env
+.env.*
+*.key
+*.pem
+*.token
+*id_rsa*
+credentials.json
+git_config.json
+
+# Salesforce & IDE Noise
+.sf/
+.sfdx/
+*catalog.json*
+*.__staging__
+*.tmp
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.venv/
+env/
+*.egg-info/
+
+# Node & Web
+node_modules/
+.npm/
+dist/
+.next/
+.cache/
+
+# SPD Engine Files
+.spd/
+session.db*
+*.patch
+worker.log
+*.meta
