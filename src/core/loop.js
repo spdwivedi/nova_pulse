@@ -1,19 +1,19 @@
 /**
  * @file loop.js
- * @description High-precision requestAnimationFrame game loop for NovaPulse.
+ * @description High-precision requestAnimationFrame game loop with hardware telemetry for NovaPulse.
  *
  * Features:
- *  - Delta-time clamping (max 0.1 s) to prevent spiral-of-death on tab-switch.
+ *  - Delta-time clamping (max 0.1 s) to prevent spiral-of-death on tab restore.
  *  - Fixed-timestep physics accumulator running at 60 Hz (16.666 ms steps).
  *  - Sub-frame alpha for render interpolation between physics states.
- *  - Rolling average FPS and tick-time (last N samples).
+ *  - Rolling average FPS, physics tick time, render rasterization time, and frame delta.
+ *  - Memory heap size telemetry detection (in supported browser environments).
  *  - Clean start / stop / pause / resume API.
  */
 
 const FIXED_STEP     = 1 / 60;          // seconds — 60 Hz physics
-const FIXED_STEP_MS  = FIXED_STEP * 1000;
 const MAX_DELTA      = 0.1;             // seconds — clamp on tab restore
-const FPS_SAMPLE_SZ  = 60;             // rolling window size
+const SAMPLE_SZ      = 60;              // rolling window size
 
 export class GameLoop {
   /**
@@ -36,14 +36,20 @@ export class GameLoop {
     this._lastTime     = 0;      // ms
     this._accumulator  = 0;      // s
 
-    // Metrics — rolling arrays for average
-    this._fpsSamples   = new Float32Array(FPS_SAMPLE_SZ);
-    this._tickSamples  = new Float32Array(FPS_SAMPLE_SZ);
-    this._sampleHead   = 0;
+    // Metrics — circular buffers for rolling averages
+    this._fpsSamples     = new Float32Array(SAMPLE_SZ);
+    this._physicsSamples = new Float32Array(SAMPLE_SZ);
+    this._renderSamples  = new Float32Array(SAMPLE_SZ);
+    this._frameSamples   = new Float32Array(SAMPLE_SZ);
+    this._sampleHead     = 0;
 
     // Public metrics (read-only, updated each frame)
     this.fps           = 0;
-    this.tickMs        = 0;
+    this.tickMs        = 0;      // alias for physicsTimeMs for backward compat
+    this.physicsTimeMs = 0;
+    this.renderTimeMs  = 0;
+    this.frameTimeMs   = 0;
+    this.memoryUsedMb  = 0;
     this.frameCount    = 0;
     this.simTime       = 0;      // total simulated seconds
 
@@ -87,7 +93,7 @@ export class GameLoop {
   resume() {
     if (!this._running || !this._paused) return;
     this._paused   = false;
-    this._lastTime = performance.now(); // reset to avoid burst
+    this._lastTime = performance.now();
     this._rafId    = requestAnimationFrame(this._rafCallback);
   }
 
@@ -99,25 +105,23 @@ export class GameLoop {
   // ── Internal tick ─────────────────────────────────────────
 
   /**
-   * Core RAF callback — orchestrates fixed-step accumulation and rendering.
+   * Core RAF callback — orchestrates fixed-step accumulation, render, and profiling.
    * @param {number} now - High-resolution timestamp (ms) from RAF.
    */
   _tick(now) {
     if (!this._running || this._paused) return;
 
     // ── Delta-time computation + clamp ─────────────────────
-    let dtMs    = now - this._lastTime;
+    let dtMs = now - this._lastTime;
     this._lastTime = now;
 
-    // Clamp: if tab was hidden, dtMs can be huge — prevent spiral
+    // Clamp: if tab was hidden, dtMs can be huge — prevent spiral-of-death
     if (dtMs > MAX_DELTA * 1000) dtMs = MAX_DELTA * 1000;
+    const dt = dtMs / 1000;
 
-    const dt = dtMs / 1000; // convert to seconds
-
-    // ── Fixed-timestep accumulator ─────────────────────────
+    // ── Fixed-timestep accumulator (Physics & Collision) ───
     this._accumulator += dt;
-
-    const tickStart = performance.now();
+    const physicsStart = performance.now();
 
     while (this._accumulator >= FIXED_STEP) {
       this._fixedUpdate(FIXED_STEP);
@@ -125,29 +129,43 @@ export class GameLoop {
       this.simTime      += FIXED_STEP;
     }
 
-    const tickEnd = performance.now();
+    const physicsEnd = performance.now();
+    const instantPhysics = physicsEnd - physicsStart;
 
     // ── Sub-frame alpha (interpolation blend factor) ───────
-    // alpha = how far we are into the current physics step [0, 1)
     const alpha = this._accumulator / FIXED_STEP;
 
-    // ── Frame update + render ──────────────────────────────
+    // ── Frame update (Game logic / HUD preparation) ────────
     this._update(dt, alpha);
+
+    // ── Render pass (Canvas GPU draw calls) ────────────────
+    const renderStart = performance.now();
     this._render(alpha);
+    const renderEnd = performance.now();
+    const instantRender = renderEnd - renderStart;
 
-    // ── Metrics ────────────────────────────────────────────
+    // ── Telemetry & Metrics ────────────────────────────────
     this.frameCount++;
-    const instantFps  = dtMs > 0 ? 1000 / dtMs : 0;
-    const instantTick = tickEnd - tickStart;
+    const instantFps = dtMs > 0 ? 1000 / dtMs : 0;
 
-    const idx = this._sampleHead % FPS_SAMPLE_SZ;
-    this._fpsSamples[idx]  = instantFps;
-    this._tickSamples[idx] = instantTick;
+    const idx = this._sampleHead % SAMPLE_SZ;
+    this._fpsSamples[idx]     = instantFps;
+    this._physicsSamples[idx] = instantPhysics;
+    this._renderSamples[idx]  = instantRender;
+    this._frameSamples[idx]   = dtMs;
     this._sampleHead++;
 
-    // Compute rolling average
-    this.fps    = this._rollingAvg(this._fpsSamples);
-    this.tickMs = this._rollingAvg(this._tickSamples);
+    // Compute rolling averages
+    this.fps           = this._rollingAvg(this._fpsSamples);
+    this.physicsTimeMs = this._rollingAvg(this._physicsSamples);
+    this.tickMs        = this.physicsTimeMs;
+    this.renderTimeMs  = this._rollingAvg(this._renderSamples);
+    this.frameTimeMs   = this._rollingAvg(this._frameSamples);
+
+    // Memory heap estimation if available in browser
+    if (typeof performance !== 'undefined' && performance.memory?.usedJSHeapSize) {
+      this.memoryUsedMb = Math.round((performance.memory.usedJSHeapSize / (1024 * 1024)) * 10) / 10;
+    }
 
     // ── Schedule next frame ────────────────────────────────
     this._rafId = requestAnimationFrame(this._rafCallback);
@@ -162,7 +180,7 @@ export class GameLoop {
    */
   _rollingAvg(arr) {
     let sum = 0;
-    const len = Math.min(this.frameCount, FPS_SAMPLE_SZ);
+    const len = Math.min(this.frameCount, SAMPLE_SZ);
     if (len === 0) return 0;
     for (let i = 0; i < len; i++) sum += arr[i];
     return sum / len;

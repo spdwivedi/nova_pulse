@@ -109,13 +109,21 @@ export class World {
   // ── Query ─────────────────────────────────────────────────
 
   /**
-   * Return all live entities matching a bitmask.
+   * Return all live entities matching a bitmask or array of component classes.
    * Called internally by the tick methods; exposed for system use.
    *
-   * @param {number} mask
+   * @param {number|Function[]} maskOrTypes
    * @returns {Entity[]}
    */
-  query(mask) {
+  query(maskOrTypes) {
+    let mask = 0;
+    if (typeof maskOrTypes === 'number') {
+      mask = maskOrTypes;
+    } else if (Array.isArray(maskOrTypes)) {
+      for (let i = 0; i < maskOrTypes.length; i++) {
+        mask |= registerComponentType(maskOrTypes[i]);
+      }
+    }
     const result = [];
     for (const entity of this._entities.values()) {
       if (!entity.destroyed && entity.matchesMask(mask)) {

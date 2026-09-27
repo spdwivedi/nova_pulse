@@ -25,6 +25,11 @@
  *  15. ParticlePool — pre-allocation, decay lifecycle, preset emitters
  *  16. CombatSystem & Weapons — damage application, entity death, and weapons
  *  17. Phase 4 Components & SoundSynth — WeaponComponent, AudioSourceComponent, SoundSynth
+ *  18. QuantumBlackHole — inverse-square gravity calculation & singularity distance clamping
+ *  19. PulsingLaserGate — line segment intersection math & projection clamping
+ *  20. KineticMine & ArenaManager — proximity trigger, blast radius, & hazard coordination
+ *  21. WaveDirector — procedural waves, state transitions, scoring, & boss victory
+ *  22. High-Density Scaling & Telemetry Profiling — 1,000+ entity stress stability & hardware metrics
  */
 
 import assert from 'node:assert/strict';
@@ -1582,6 +1587,417 @@ test('SoundSynth initializes safely without error and toggles mute', () => {
     synth.playExplosion();
     synth.playThruster(true, 0.8);
   });
+});
+
+// ─────────────────────────────────────────────────────────────
+//  Suite 18: QuantumBlackHole (Phase 5)
+// ─────────────────────────────────────────────────────────────
+
+import { QuantumBlackHole, PulsingLaserGate, KineticMine, ArenaManager } from '../src/environment/arena.js';
+
+suite('QuantumBlackHole — Gravitation & Clamping');
+
+test('calculates inverse-square gravitational pull toward center', () => {
+  const bh = new QuantumBlackHole({
+    centerX: 300,
+    centerY: 300,
+    mass: 100000,
+    eventHorizon: 30,
+    gravityRadius: 500,
+  });
+
+  const pos = new Vec2(200, 300); // 100px away on x-axis
+  const force = bh.getGravitationalForce(pos, 1.0);
+
+  // Direction: (300 - 200) / 100 = +1 on x, 0 on y
+  // Force magnitude: 100000 / (100^2) = 10.0
+  approx(force.x, 10.0);
+  approx(force.y, 0.0);
+});
+
+test('returns zero force beyond gravity radius', () => {
+  const bh = new QuantumBlackHole({
+    centerX: 200,
+    centerY: 200,
+    mass: 100000,
+    eventHorizon: 30,
+    gravityRadius: 300,
+  });
+
+  const pos = new Vec2(600, 200); // dist = 400 > 300
+  const force = bh.getGravitationalForce(pos);
+  assert.equal(force.x, 0);
+  assert.equal(force.y, 0);
+});
+
+test('clamps effective distance near singularity to prevent infinite spike', () => {
+  const bh = new QuantumBlackHole({
+    centerX: 100,
+    centerY: 100,
+    mass: 100000,
+    eventHorizon: 40,
+    gravityRadius: 400,
+  });
+
+  const pos = new Vec2(101, 100); // dist = 1
+  const force = bh.getGravitationalForce(pos);
+
+  // Clamped dist = max(1, 40 * 0.7) = 28
+  // Expected magnitude = 100000 / (28^2) ≈ 127.551
+  const expectedMag = 100000 / (28 * 28);
+  approx(force.mag(), expectedMag);
+  assert.equal(Number.isFinite(force.x), true);
+  assert.equal(Number.isFinite(force.y), true);
+});
+
+test('gravitational force scales with entity mass', () => {
+  const bh = new QuantumBlackHole({
+    centerX: 200,
+    centerY: 200,
+    mass: 50000,
+    eventHorizon: 20,
+    gravityRadius: 400,
+  });
+
+  const pos = new Vec2(200, 100);
+  const f1 = bh.getGravitationalForce(pos, 1.0, new Vec2());
+  const f2 = bh.getGravitationalForce(pos, 2.5, new Vec2());
+
+  approx(f2.mag(), f1.mag() * 2.5);
+});
+
+// ─────────────────────────────────────────────────────────────
+//  Suite 19: PulsingLaserGate (Phase 5)
+// ─────────────────────────────────────────────────────────────
+
+suite('PulsingLaserGate — Segment Intersection Math');
+
+test('computes correct endpoints from center, length, and angle', () => {
+  const gate = new PulsingLaserGate({
+    centerX: 200,
+    centerY: 150,
+    length: 100,
+    angularSpeed: 0,
+  });
+  gate.angle = 0; // horizontal
+
+  const { ax, ay, bx, by } = gate.getEndpoints();
+  approx(ax, 150);
+  approx(ay, 150);
+  approx(bx, 250);
+  approx(by, 150);
+});
+
+test('detects intersection when circular entity is close to laser segment', () => {
+  const gate = new PulsingLaserGate({
+    centerX: 100,
+    centerY: 100,
+    length: 200,
+  });
+  gate.angle = 0; // segment from (0, 100) to (200, 100)
+
+  // Point on segment at (100, 103), radius = 5, thickness = 3.5 -> threshold = 8.5
+  assert.equal(gate.checkIntersection(100, 103, 5), true);
+});
+
+test('rejects entity positioned outside threshold perpendicular distance', () => {
+  const gate = new PulsingLaserGate({
+    centerX: 100,
+    centerY: 100,
+    length: 200,
+  });
+  gate.angle = 0;
+
+  // Point at (100, 120), dist = 20 > 8.5
+  assert.equal(gate.checkIntersection(100, 120, 5), false);
+});
+
+test('clamps projection to segment endpoints for distant collinear points', () => {
+  const gate = new PulsingLaserGate({
+    centerX: 100,
+    centerY: 100,
+    length: 200,
+  });
+  gate.angle = 0; // segment from (0, 100) to (200, 100)
+
+  // Collinear point beyond endpoint at (250, 100), nearest point is (200, 100) -> dist = 50
+  assert.equal(gate.checkIntersection(250, 100, 5), false);
+
+  // Near endpoint at (203, 100), nearest point is (200, 100) -> dist = 3 <= 8.5
+  assert.equal(gate.checkIntersection(203, 100, 5), true);
+});
+
+test('updates angle and pulse phase over time', () => {
+  const gate = new PulsingLaserGate({
+    centerX: 0,
+    centerY: 0,
+    angularSpeed: 2.0,
+  });
+  const initialAngle = gate.angle;
+  gate.update(0.5);
+  approx(gate.angle, initialAngle + 1.0);
+  assert.ok(gate.pulsePhase > 0);
+});
+
+// ─────────────────────────────────────────────────────────────
+//  Suite 20: KineticMine & ArenaManager (Phase 5)
+// ─────────────────────────────────────────────────────────────
+
+suite('KineticMine & ArenaManager — Environmental Hazards');
+
+test('KineticMine triggers when entity enters proximity threshold', () => {
+  const mine = new KineticMine({
+    x: 100,
+    y: 100,
+    triggerRadius: 50,
+    blastRadius: 100,
+    damage: 80,
+  });
+
+  assert.equal(mine.isArmed, false);
+
+  // Position at (180, 100): dx = 80 > 50 -> no trigger
+  assert.equal(mine.checkTrigger(180, 100), false);
+  assert.equal(mine.isArmed, false);
+
+  // Position at (130, 100): dx = 30 <= 50 -> triggers arming
+  assert.equal(mine.checkTrigger(130, 100), true);
+  assert.equal(mine.isArmed, true);
+});
+
+test('KineticMine fuse countdown detonates and inflicts radial blast damage', () => {
+  const mine = new KineticMine({
+    x: 200,
+    y: 200,
+    triggerRadius: 40,
+    blastRadius: 80,
+    damage: 100,
+  });
+  mine.isArmed = true;
+  mine.fuseTimer = 0.2;
+
+  mine.update(0.25);
+  assert.equal(mine.detonated, true);
+
+  // Mock nearby entity inside blast radius
+  const victimTf = new TransformComponent(230, 200); // 30px away (<= 80px)
+  const victimCombat = new CombatStateComponent({ health: 150, maxHealth: 150 });
+  const victimKin = new KinematicsComponent();
+  const mockEntity = {
+    destroyed: false,
+    get(cls) {
+      if (cls === TransformComponent) return victimTf;
+      if (cls === CombatStateComponent) return victimCombat;
+      if (cls === KinematicsComponent) return victimKin;
+      return null;
+    },
+  };
+
+  mine.detonate(null, null, [mockEntity]);
+  assert.equal(mine.active, false);
+  assert.ok(victimCombat.health < 150, 'Victim should take damage from mine blast');
+  assert.ok(victimKin.velocity.x > 0, 'Victim should receive radial knockback impulse');
+});
+
+test('ArenaManager coordinates laser gates, black holes, and shrinks boundaries', () => {
+  const arena = new ArenaManager({ width: 1000, height: 1000 });
+  assert.equal(arena.laserGates.length, 0);
+  assert.equal(arena.blackHole, null);
+
+  arena.addLaserGate(new PulsingLaserGate({ centerX: 500, centerY: 500, length: 150 }));
+  arena.setBlackHole(new QuantumBlackHole({ centerX: 500, centerY: 500 }));
+  arena.addMine(new KineticMine({ x: 300, y: 300 }));
+
+  assert.equal(arena.laserGates.length, 1);
+  assert.ok(arena.blackHole !== null);
+  assert.equal(arena.mines.length, 1);
+
+  // Test clearHazards
+  arena.clearHazards();
+  assert.equal(arena.laserGates.length, 0);
+  assert.equal(arena.blackHole, null);
+  assert.equal(arena.mines.length, 0);
+});
+
+// ─────────────────────────────────────────────────────────────
+//  Suite 21: WaveDirector & Boss Encounters (Phase 5)
+// ─────────────────────────────────────────────────────────────
+
+import { WaveDirector, WAVE_CONFIGS } from '../src/ai/wave_director.js';
+
+suite('WaveDirector — Waves, Threat & Victory');
+
+test('initializes with Wave 1 in intermission state', () => {
+  const director = new WaveDirector({ bus: null });
+  assert.equal(director.waveNumber, 1);
+  assert.equal(director.currentConfig.title, 'THE GATHERING');
+  assert.equal(director.state, 'intermission');
+  assert.equal(director.survivalScore, 0);
+});
+
+test('transitions from intermission to active upon timer expiry', () => {
+  let spawnCalled = false;
+  let spawnedConfig = null;
+
+  const director = new WaveDirector({
+    bus: null,
+    onSpawnWave: cfg => {
+      spawnCalled = true;
+      spawnedConfig = cfg;
+    },
+  });
+
+  director.start();
+  director.update(director.intermissionTime + 0.1);
+
+  assert.equal(director.state, 'active');
+  assert.equal(spawnCalled, true);
+  assert.equal(spawnedConfig.wave, 1);
+  assert.equal(director.timer, WAVE_CONFIGS[0].duration);
+});
+
+test('advances to Wave 2 intermission after surviving Wave 1 duration', () => {
+  const director = new WaveDirector({ bus: null });
+  director.start();
+  // Clear intermission
+  director.update(director.intermissionTime + 0.1);
+  assert.equal(director.waveNumber, 1);
+  assert.equal(director.state, 'active');
+
+  // Complete Wave 1 duration
+  director.update(WAVE_CONFIGS[0].duration + 0.1);
+  assert.equal(director.waveNumber, 2);
+  assert.equal(director.state, 'intermission');
+  assert.equal(director.currentConfig.title, 'PREDATOR SURGE');
+});
+
+test('scoring accumulates with threat multiplier and enemy kills', () => {
+  const director = new WaveDirector({ bus: null });
+  director.start();
+
+  // Wave 1 threat = 1.0
+  director.onEnemyKilled(false);
+  assert.equal(director.survivalScore, 150);
+
+  // Force Wave 2 (threat = 1.5)
+  director.currentWaveIndex = 1;
+  director.onEnemyKilled(false);
+  // 150 + round(150 * 1.5) = 150 + 225 = 375
+  assert.equal(director.survivalScore, 375);
+});
+
+test('boss defeat grants 5000 points and triggers victory', () => {
+  let victoryFired = false;
+  const bus = {
+    emit(event, data) {
+      if (event === 'wave:victory') victoryFired = true;
+    },
+  };
+
+  const director = new WaveDirector({ bus });
+  director.start();
+  director.currentWaveIndex = 3; // Wave 4: Dreadnought Incursion
+
+  director.onEnemyKilled(true);
+
+  assert.equal(director.bossDefeated, true);
+  assert.equal(director.state, 'victory');
+  assert.equal(director.survivalScore, 5000);
+  assert.equal(victoryFired, true);
+});
+
+test('triggerGameOver dispatches event and updates state', () => {
+  let gameOverFired = false;
+  const bus = {
+    emit(event) {
+      if (event === 'wave:gameOver') gameOverFired = true;
+    },
+  };
+
+  const director = new WaveDirector({ bus });
+  director.start();
+  director.triggerGameOver();
+
+  assert.equal(director.state, 'game_over');
+  assert.equal(gameOverFired, true);
+});
+
+// ─────────────────────────────────────────────────────────────
+//  Suite 22: High-Density Scaling & Telemetry Profiling (Phase 5)
+// ─────────────────────────────────────────────────────────────
+
+import { TransformComponent as TfComp, KinematicsComponent as KinComp, BoidComponent as BoidComp, ColliderComponent as ColComp } from '../src/ecs/components.js';
+import { GameLoop } from '../src/core/loop.js';
+
+suite('High-Density Entity Scaling & Profiler');
+
+test('SpatialHashGrid indexes and queries 1,000+ entities with stable deduplication', () => {
+  const grid = new SpatialHashGrid({ cellSize: 64 });
+  const entityCount = 1200;
+
+  for (let i = 0; i < entityCount; i++) {
+    const x = (i % 40) * 45;
+    const y = Math.floor(i / 40) * 35;
+    grid.insert(i, {
+      minX: x - 6,
+      minY: y - 6,
+      maxX: x + 6,
+      maxY: y + 6,
+    });
+  }
+
+  assert.equal(grid.insertCount, entityCount);
+
+  // Query a 200x200 region
+  const queryBox = { minX: 100, minY: 100, maxX: 300, maxY: 300 };
+  const found = grid.query(queryBox);
+
+  assert.ok(found.size > 0, 'Query should locate entities in target region');
+  assert.ok(found.size < entityCount, 'Query should prune outside entities');
+
+  grid.clear();
+  assert.equal(grid.insertCount, 0);
+});
+
+test('ECS World handles 1,000+ concurrent entities without degradation', () => {
+  const world = new World();
+  const N = 1000;
+
+  for (let i = 0; i < N; i++) {
+    world.createEntity(e => {
+      e.add(new TfComp(i, i))
+       .add(new KinComp())
+       .add(new BoidComp({ flockType: 'blue' }))
+       .add(new ColComp({ shape: new CircleCollider({ radius: 6 }) }));
+    });
+  }
+
+  assert.equal(world.entityCount, N);
+
+  const boids = world.query([TfComp, KinComp, BoidComp]);
+  assert.equal(boids.length, N);
+
+  // Batch destroy all entities
+  for (let i = 0; i < boids.length; i++) {
+    world.destroyEntity(boids[i]);
+  }
+  world.flush();
+
+  assert.equal(world.entityCount, 0);
+});
+
+test('GameLoop tracks rolling profiling metrics without NaN', () => {
+  const loop = new GameLoop({
+    fixedUpdate(dt) {},
+    render(alpha) {},
+  });
+
+  assert.equal(typeof loop.physicsTimeMs, 'number');
+  assert.equal(typeof loop.renderTimeMs, 'number');
+  assert.equal(typeof loop.frameTimeMs, 'number');
+  assert.equal(Number.isNaN(loop.physicsTimeMs), false);
+  assert.equal(Number.isNaN(loop.renderTimeMs), false);
+  assert.equal(Number.isNaN(loop.frameTimeMs), false);
 });
 
 // ─────────────────────────────────────────────────────────────

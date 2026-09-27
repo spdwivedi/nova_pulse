@@ -146,3 +146,55 @@ export function fireHunterSpore(transform, weapon, targetPos, pool, fx = null, a
   weapon.cooldown = 1 / (weapon.fireRate || 1.2);
   return true;
 }
+
+/**
+ * Fire multi-turret spore cannons from the Crimson Boss Dreadnought.
+ * Discharges a wide 5-way spread of tracking spores.
+ *
+ * @param {object} transform
+ * @param {object} weapon
+ * @param {import('../core/math.js').Vec2} [targetPos]
+ * @param {import('./projectile_pool.js').ProjectilePool} pool
+ * @param {import('../fx/particle_pool.js').ParticlePool} [fx]
+ * @param {import('../audio/sound_synth.js').SoundSynth} [audio]
+ * @returns {boolean}
+ */
+export function fireBossTurrets(transform, weapon, targetPos, pool, fx = null, audio = null) {
+  if (weapon.cooldown > 0) return false;
+
+  const posX = transform.position.x;
+  const posY = transform.position.y;
+  let baseAngle = transform.rotation;
+
+  if (targetPos) {
+    baseAngle = Math.atan2(targetPos.y - posY, targetPos.x - posX);
+  }
+
+  const speed = weapon.projectileSpeed || 280;
+  const damage = weapon.damage || 22;
+  const ttl = weapon.ttl || 2.4;
+  const color = '#ff0044';
+  const angles = [-0.4, -0.2, 0, 0.2, 0.4];
+
+  for (let i = 0; i < angles.length; i++) {
+    const a = baseAngle + angles[i];
+    const vx = Math.cos(a) * speed;
+    const vy = Math.sin(a) * speed;
+    const sx = posX + Math.cos(a) * 24;
+    const sy = posY + Math.sin(a) * 24;
+
+    pool.spawn(sx, sy, vx, vy, 'crimson', damage, ttl, color, 4.2);
+
+    if (fx && i % 2 === 0) {
+      fx.emitMuzzleFlash(sx, sy, a, color);
+    }
+  }
+
+  if (audio) {
+    audio.playLaser(550, 140, 0.22);
+  }
+
+  weapon.cooldown = 1 / (weapon.fireRate || 0.65);
+  return true;
+}
+

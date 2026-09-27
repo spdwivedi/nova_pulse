@@ -31,7 +31,7 @@ import { SpatialHashGrid }       from '../physics/spatial_hash.js';
 import { testCollision }         from '../physics/narrowphase.js';
 import { CollisionResolver }     from '../physics/resolver.js';
 import { computeBlueFlockSteering, computeCrimsonHunterSteering } from '../ai/behaviors.js';
-import { firePlayerCannon, fireHunterSpore } from '../combat/weapons.js';
+import { firePlayerCannon, fireHunterSpore, fireBossTurrets } from '../combat/weapons.js';
 
 // ─────────────────────────────────────────────────────────────
 //  MovementSystem
@@ -671,19 +671,35 @@ export class CombatSystem {
           );
         }
       } else {
-        // Hunter / Crimson Drone Spore Emitter
-        const boid = entity.get(BoidComponent);
-        if (boid && boid.flockType === 'crimson') {
-          // Occasionally fire when hunting
-          if (Math.random() < 0.015 && weapon.cooldown <= 0) {
-            fireHunterSpore(
+        // Boss Dreadnought vs Standard Hunter
+        const rc = entity.get(RenderComponent);
+        if (entity.isBoss || rc?.shape === 'dreadnought') {
+          if (weapon.cooldown <= 0) {
+            const playerEntity = world.query([PlayerControllerComponent, TransformComponent])[0];
+            const pTf = playerEntity?.get(TransformComponent);
+            fireBossTurrets(
               tf,
               weapon,
-              null,
+              pTf ? pTf.position : null,
               this.projectilePool,
               this.particlePool,
               this.soundSynth
             );
+          }
+        } else {
+          // Standard Hunter / Crimson Drone Spore Emitter
+          const boid = entity.get(BoidComponent);
+          if (boid && boid.flockType === 'crimson') {
+            if (Math.random() < 0.015 && weapon.cooldown <= 0) {
+              fireHunterSpore(
+                tf,
+                weapon,
+                null,
+                this.projectilePool,
+                this.particlePool,
+                this.soundSynth
+              );
+            }
           }
         }
       }
@@ -750,23 +766,24 @@ export class CombatSystem {
             const isKilled = combat.takeDamage(p.damage);
             if (isKilled) {
               this.enemiesDestroyed++;
+              const isBoss = entity.isBoss || (combat.maxHealth >= 800) || (rc?.shape === 'dreadnought');
 
               // Radial blast explosion FX
               if (this.particlePool) {
                 this.particlePool.emitExplosion(
                   tf.position.x,
                   tf.position.y,
-                  entityTeam === 'crimson' ? 36 : 24,
+                  isBoss ? 64 : (entityTeam === 'crimson' ? 36 : 24),
                   rc ? rc.color : (entityTeam === 'crimson' ? '#ff2d55' : '#00ffe7')
                 );
               }
 
               if (this.soundSynth) {
-                this.soundSynth.playExplosion(0.48);
+                this.soundSynth.playExplosion(isBoss ? 0.75 : 0.48);
               }
 
               if (this.bus) {
-                this.bus.emit('entity:destroyed', { entity, killerTeam: p.team });
+                this.bus.emit('entity:destroyed', { entity, killerTeam: p.team, isBoss });
               }
 
               world.destroyEntity(entity);
@@ -800,12 +817,14 @@ export class RenderSystem {
    */
   constructor({
     debugWireframe = false,
+    enableGlow     = true,
     grid           = null,
     viewport       = null,
     projectilePool = null,
     particlePool   = null,
   } = {}) {
     this.debugWireframe = debugWireframe;
+    this.enableGlow     = enableGlow;
     this.grid           = grid;
     this.viewport       = viewport;
     this.projectilePool = projectilePool;
@@ -860,8 +879,8 @@ export class RenderSystem {
         this._drawThrusterFlames(ctx, sz, thrusterPower);
       }
 
-      // Glow — amplified during collision flash
-      const glowRadius = isFlashing ? rc.glow + flashT * 22 : rc.glow;
+      // Glow — amplified during collision flash (honors enableGlow)
+      const glowRadius = this.enableGlow ? (isFlashing ? rc.glow + flashT * 22 : rc.glow) : 0;
       if (glowRadius > 0) {
         ctx.shadowBlur  = glowRadius;
         ctx.shadowColor = isFlashing ? '#ffffff' : rc.color;
@@ -884,6 +903,9 @@ export class RenderSystem {
           break;
         case 'flagship':
           this._drawFlagship(ctx, sz);
+          break;
+        case 'dreadnought':
+          this._drawDreadnought(ctx, sz);
           break;
         case 'diamond':
           this._drawDiamond(ctx, sz);
@@ -931,10 +953,13 @@ export class RenderSystem {
   // ── Projectile Drawing ────────────────────────────────────
 
   _drawProjectiles(ctx) {
+    const useGlow = this.enableGlow;
     this.projectilePool.forEachActive(p => {
       ctx.save();
-      ctx.shadowBlur  = 12;
-      ctx.shadowColor = p.color;
+      if (useGlow) {
+        ctx.shadowBlur  = 12;
+        ctx.shadowColor = p.color;
+      }
       ctx.fillStyle   = p.color;
       ctx.strokeStyle = '#ffffff';
       ctx.lineWidth   = 1;
@@ -966,8 +991,9 @@ export class RenderSystem {
     // Hardware-accelerated additive neon blooms!
     ctx.globalCompositeOperation = 'lighter';
 
-    const pool = this.particlePool.pool;
-    const len  = this.particlePool.maxCapacity;
+    const pool    = this.particlePool.pool;
+    const len     = this.particlePool.maxCapacity;
+    const useGlow = this.enableGlow;
 
     for (let i = 0; i < len; i++) {
       const pt = pool[i];
@@ -975,8 +1001,10 @@ export class RenderSystem {
 
       ctx.globalAlpha = pt.alpha;
       ctx.fillStyle   = pt.color;
-      ctx.shadowColor = pt.color;
-      ctx.shadowBlur  = 8;
+      if (useGlow) {
+        ctx.shadowColor = pt.color;
+        ctx.shadowBlur  = 8;
+      }
 
       if (pt.shape === 'ring') {
         ctx.strokeStyle = pt.color;
@@ -1040,6 +1068,25 @@ export class RenderSystem {
     ctx.lineTo(-sz * 0.6, -sz * 1.15);
     ctx.lineTo(-sz * 0.1, -sz * 1.4);
     ctx.lineTo(sz * 0.9,  -sz * 0.4);
+  }
+
+  _drawDreadnought(ctx, sz) {
+    ctx.moveTo(sz * 2.2, 0);
+    ctx.lineTo(sz * 1.2, sz * 0.7);
+    ctx.lineTo(sz * 0.4, sz * 0.5);
+    ctx.lineTo(0, sz * 1.6);
+    ctx.lineTo(-sz * 0.8, sz * 1.3);
+    ctx.lineTo(-sz * 0.7, sz * 0.6);
+    ctx.lineTo(-sz * 1.5, sz * 0.6);
+    ctx.lineTo(-sz * 1.5, sz * 0.2);
+    ctx.lineTo(-sz * 1.1, 0);
+    ctx.lineTo(-sz * 1.5, -sz * 0.2);
+    ctx.lineTo(-sz * 1.5, -sz * 0.6);
+    ctx.lineTo(-sz * 0.7, -sz * 0.6);
+    ctx.lineTo(-sz * 0.8, -sz * 1.3);
+    ctx.lineTo(0, -sz * 1.6);
+    ctx.lineTo(sz * 0.4, -sz * 0.5);
+    ctx.lineTo(sz * 1.2, -sz * 0.7);
   }
 
   _drawThrusterFlames(ctx, sz, power) {
