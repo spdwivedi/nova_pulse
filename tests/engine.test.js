@@ -1,6 +1,6 @@
 /**
  * @file engine.test.js
- * @description Automated unit tests for NovaPulse Phase 1 & 2.
+ * @description Automated unit tests for NovaPulse (Phase 1, 2, & 3).
  *
  * Run via:  npm test  (node tests/engine.test.js)
  *
@@ -17,6 +17,10 @@
  *  7. Narrowphase — circle-circle, AABB-AABB, circle-AABB
  *  8. CollisionResolver — impulse momentum conservation
  *  9. ColliderComponent & RigidBodyComponent — Phase 2 components
+ *  10. Steering Behaviors — seek, flee, wander, separation, alignment, cohesion
+ *  11. Swarm Behaviors — blue flocking & crimson hunter AI
+ *  12. Spatial Hash Neighbor Radius Perception
+ *  13. Phase 3 Components & Player Controller Integration
  */
 
 import assert from 'node:assert/strict';
@@ -1066,6 +1070,262 @@ test('restitution and friction stored correctly', () => {
 });
 
 // ─────────────────────────────────────────────────────────────
+//  Suite 10: Steering Behaviors (Phase 3)
+// ─────────────────────────────────────────────────────────────
+
+import {
+  seek,
+  flee,
+  wander,
+  separation,
+  alignment,
+  cohesion,
+} from '../src/ai/steering.js';
+
+suite('Steering Behaviors — seek & flee');
+
+test('seek: vector points directly towards target at maxSpeed', () => {
+  const agentPos = new Vec2(0, 0);
+  const targetPos = new Vec2(100, 0);
+  const v = seek(agentPos, targetPos, 150);
+  approxLoose(v.x, 150);
+  approxLoose(v.y, 0);
+});
+
+test('seek: diagonal target produces normalized vector at maxSpeed', () => {
+  const agentPos = new Vec2(10, 10);
+  const targetPos = new Vec2(40, 50);
+  const v = seek(agentPos, targetPos, 100);
+  approxLoose(v.mag(), 100);
+  // Heading matches angle between points
+  const expectedAngle = Math.atan2(40, 30);
+  approxLoose(v.heading(), expectedAngle);
+});
+
+test('seek: coincident positions return zero vector', () => {
+  const pos = new Vec2(50, 50);
+  const v = seek(pos, pos, 150);
+  assert.equal(v.magSq(), 0);
+});
+
+test('flee: vector points directly away from threat at maxSpeed', () => {
+  const agentPos = new Vec2(50, 0);
+  const threatPos = new Vec2(0, 0);
+  const v = flee(agentPos, threatPos, 120);
+  approxLoose(v.x, 120);
+  approxLoose(v.y, 0);
+});
+
+test('flee: returns zero vector if threat is outside panicDistance', () => {
+  const agentPos = new Vec2(0, 0);
+  const threatPos = new Vec2(200, 0);
+  const v = flee(agentPos, threatPos, 100, 100); // panicDistance = 100, actual dist = 200
+  assert.equal(v.magSq(), 0);
+});
+
+test('flee: activates when threat is inside panicDistance', () => {
+  const agentPos = new Vec2(0, 0);
+  const threatPos = new Vec2(50, 0);
+  const v = flee(agentPos, threatPos, 100, 80); // panicDistance = 80, actual dist = 50
+  approxLoose(v.mag(), 100);
+  approxLoose(v.x, -100); // flees away in -x
+});
+
+suite('Steering Behaviors — wander, separation, alignment, cohesion');
+
+test('wander: generates valid displacement vector on circle', () => {
+  const vel = new Vec2(10, 0);
+  const v = wander(vel, 20, 50, 0);
+  // Velocity along x: center at (50, 0), displacement at angle 0 is (20, 0) -> (70, 0)
+  approxLoose(v.x, 70);
+  approxLoose(v.y, 0);
+});
+
+test('separation: pushes directly away from close neighbor', () => {
+  const agentPos = new Vec2(0, 0);
+  const neighbors = [{ position: new Vec2(10, 0) }];
+  const v = separation(agentPos, neighbors, 30);
+  // Neighbor is at +10x -> agent should be pushed in -x
+  assert.ok(v.x < 0, 'Separation should push away from neighbor');
+  approxLoose(v.y, 0);
+  approxLoose(v.mag(), 1);
+});
+
+test('separation: returns zero vector when no neighbors are within desired distance', () => {
+  const agentPos = new Vec2(0, 0);
+  const neighbors = [{ position: new Vec2(100, 0) }];
+  const v = separation(agentPos, neighbors, 30);
+  assert.equal(v.magSq(), 0);
+});
+
+test('alignment: matches average velocity of local flockmates', () => {
+  const agentVel = new Vec2(0, 0);
+  const neighbors = [
+    { velocity: new Vec2(10, 20) },
+    { velocity: new Vec2(30, 20) },
+  ];
+  const v = alignment(agentVel, neighbors, 100);
+  // Average vel is (20, 20) -> heading is π/4
+  approxLoose(v.heading(), Math.PI / 4);
+  approxLoose(v.mag(), 100);
+});
+
+test('cohesion: steers towards centroid of flockmates', () => {
+  const agentPos = new Vec2(0, 0);
+  const neighbors = [
+    { position: new Vec2(40, 20) },
+    { position: new Vec2(60, 20) },
+  ];
+  // Centroid is at (50, 20)
+  const v = cohesion(agentPos, neighbors, 150);
+  approxLoose(v.mag(), 150);
+  const expectedHeading = Math.atan2(20, 50);
+  approxLoose(v.heading(), expectedHeading);
+});
+
+// ─────────────────────────────────────────────────────────────
+//  Suite 11: Swarm Behaviors (Phase 3)
+// ─────────────────────────────────────────────────────────────
+
+import {
+  computeBlueFlockSteering,
+  computeCrimsonHunterSteering,
+} from '../src/ai/behaviors.js';
+
+suite('Swarm Behaviors — Blue Flockers & Crimson Hunters');
+
+test('blue flocking steers away when predator enters panic zone', () => {
+  const pos = new Vec2(100, 100);
+  const vel = new Vec2(10, 0);
+  const flockmates = [];
+  const predators = [{ position: new Vec2(120, 100) }]; // threat directly to the right
+  const out = new Vec2();
+
+  computeBlueFlockSteering(pos, vel, flockmates, predators, 30, 160, 200, out);
+
+  // Must steer away from the predator (leftwards, negative x)
+  assert.ok(out.x < 0, 'Blue agent should steer away from predator');
+});
+
+test('crimson hunter aggressively steers toward nearest prey', () => {
+  const pos = new Vec2(50, 50);
+  const vel = new Vec2(0, 10);
+  const otherHunters = [];
+  const preyList = [
+    { position: new Vec2(150, 50) }, // prey to the right
+    { position: new Vec2(300, 300) },
+  ];
+  const out = new Vec2();
+
+  computeCrimsonHunterSteering(pos, vel, otherHunters, preyList, 0, 40, 180, 250, out);
+
+  // Must steer toward the closer prey at (150, 50) -> positive x
+  assert.ok(out.x > 0, 'Crimson hunter should steer towards nearest prey');
+});
+
+// ─────────────────────────────────────────────────────────────
+//  Suite 12: Spatial Hash Perception (Phase 3)
+// ─────────────────────────────────────────────────────────────
+
+suite('Spatial Hash — Boid Perception Queries');
+
+test('queryRadius retrieves all boids inside perception radius', () => {
+  const grid = new SpatialHashGrid({ cellSize: 48 });
+  // Center boid at (100, 100)
+  grid.insert(1, makeAABB(95, 95, 105, 105));
+  // Nearby boid at (130, 100) -> dist = 30
+  grid.insert(2, makeAABB(125, 95, 135, 105));
+  // Distant boid at (400, 400) -> dist > 400
+  grid.insert(3, makeAABB(395, 395, 405, 405));
+
+  const perceived = grid.queryRadius({ x: 100, y: 100 }, 60);
+
+  assert.ok(perceived.has(1), 'Self should be in broadphase cell');
+  assert.ok(perceived.has(2), 'Neighbor within 60px should be retrieved');
+  assert.ok(!perceived.has(3), 'Distant entity should be pruned');
+});
+
+// ─────────────────────────────────────────────────────────────
+//  Suite 13: Phase 3 Components & Player Controller
+// ─────────────────────────────────────────────────────────────
+
+import {
+  BoidComponent,
+  PlayerControllerComponent,
+  CombatStateComponent,
+} from '../src/ecs/components.js';
+import { PlayerInputSystem } from '../src/ecs/systems.js';
+
+suite('Phase 3 Components');
+
+test('BoidComponent defaults and properties', () => {
+  const boid = new BoidComponent();
+  assert.equal(boid.flockType, 'blue');
+  assert.equal(boid.perceptionRadius, 85);
+  assert.equal(boid.separationRadius, 32);
+  assert.equal(boid.maxForce, 180);
+  assert.equal(boid.maxSpeed, 160);
+});
+
+test('CombatStateComponent damage and healing', () => {
+  const combat = new CombatStateComponent({ health: 100, maxHealth: 100 });
+  const isDead = combat.takeDamage(30);
+  assert.equal(isDead, false);
+  assert.equal(combat.health, 70);
+
+  combat.heal(20);
+  assert.equal(combat.health, 90);
+
+  const fatal = combat.takeDamage(100);
+  assert.equal(fatal, true);
+  assert.equal(combat.health, 0);
+});
+
+test('PlayerControllerComponent defaults and mode flag', () => {
+  const ctrl = new PlayerControllerComponent();
+  assert.equal(ctrl.isManualControlled, false);
+  assert.equal(ctrl.thrustForce, 280);
+  assert.equal(ctrl.turnRate, 8);
+});
+
+test('PlayerInputSystem integrates thrust and rotates toward cursor in manual mode', () => {
+  const inputSys = new PlayerInputSystem();
+  // Simulate keypress and mouse position
+  inputSys.keys.forward = true;
+  inputSys.mouseCanvasPos.set(200, 100);
+
+  const tf = {
+    position: new Vec2(100, 100),
+    prevPosition: new Vec2(100, 100),
+    rotation: 0,
+    scale: 1,
+    snapshot() {},
+  };
+  const kin = {
+    velocity: new Vec2(0, 0),
+    acceleration: new Vec2(0, 0),
+    applyForce(f) { this.acceleration.add(f); },
+  };
+  const ctrl = new PlayerControllerComponent({ isManualControlled: true });
+
+  const mockEntity = {
+    get(cls) {
+      if (cls === TransformComponent) return tf;
+      if (cls === KinematicsComponent) return kin;
+      if (cls === PlayerControllerComponent) return ctrl;
+    },
+  };
+
+  inputSys.fixedUpdate([mockEntity], 1 / 60);
+
+  // Thrust should be applied along forward vector (towards +x)
+  assert.ok(kin.acceleration.x > 0, 'Forward thrust should apply positive X acceleration');
+  assert.ok(ctrl.thrusterActive > 0, 'Thruster should be activated');
+
+  inputSys.destroy();
+});
+
+// ─────────────────────────────────────────────────────────────
 //  Summary
 // ─────────────────────────────────────────────────────────────
 
@@ -1082,3 +1342,4 @@ if (failCount > 0) {
 } else {
   console.log(`${GREEN}${BOLD}All tests passed! ✓${RESET}\n`);
 }
+

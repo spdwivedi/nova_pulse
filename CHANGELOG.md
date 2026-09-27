@@ -1,5 +1,19 @@
 # Changelog
 
+### [2026-09-27 08:26 IST] feat(physics): implement collision detection and resolution system
+
+#### Key Highlights
+- Integrated 2D spatial hash grid for efficient broadphase collision detection
+- Added narrowphase collision detection and impulse-based resolution logic
+- Extended ECS components with ColliderComponent and RigidBodyComponent
+- Added comprehensive unit tests and scratchpad debugging for physics stability
+
+#### Files Modified
+CHANGELOG.md, index.html, package.json, src/core/events.js, src/core/loop.js, src/core/math.js, src/core/viewport.js, src/ecs/components.js, src/ecs/entity.js, src/ecs/systems.js
+
+#### Functional & Architectural Impact
+This release completes the Phase 2 physics integration for NovaPulse, transitioning the engine from a kinematic simulation to a fully reactive physical environment. The introduction of a spatial hash grid allows for high-density agent simulations by reducing collision complexity from O(N²) to near O(N). The new impulse-based resolver ensures physically accurate interactions between entities, while the expanded ECS architecture maintains performance by keeping physics data in cache-friendly, data-only components.
+
 ### [2026-09-27 08:12 IST] feat(engine): bootstrap NovaPulse core and ECS architecture
 
 #### Key Highlights

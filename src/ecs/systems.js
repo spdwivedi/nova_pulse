@@ -1,13 +1,15 @@
 /**
  * @file systems.js
- * @description ECS systems for NovaPulse (Phase 1 & 2).
+ * @description ECS systems for NovaPulse (Phase 1, 2, & 3).
  *
  * Systems:
- *  1. MovementSystem    — integrates kinematics (velocity + acceleration + drag)
- *  2. BoundarySystem    — wraps or bounces entities at viewport edges
- *  3. CollisionSystem   — spatial hash broadphase + narrow-phase + impulse resolution
- *  4. RenderSystem      — canvas drawing with glow, interpolation, optional debug wireframes
- *  5. WanderSystem      — stochastic autonomous roam behaviour
+ *  1. MovementSystem       — integrates kinematics (velocity + acceleration + drag)
+ *  2. BoundarySystem       — wraps or bounces entities at viewport edges
+ *  3. CollisionSystem      — spatial hash broadphase + narrow-phase + impulse resolution
+ *  4. BoidSystem           — Craig Reynolds autonomous flocking & predator-prey dynamics
+ *  5. PlayerInputSystem    — manual flight controller & mouse-aim targeting
+ *  6. RenderSystem         — canvas drawing with glow, distinct ship sprites, & crosshair
+ *  7. WanderSystem         — stochastic autonomous roam behaviour
  */
 
 import {
@@ -17,11 +19,15 @@ import {
   AgentStateComponent,
   ColliderComponent,
   RigidBodyComponent,
+  BoidComponent,
+  PlayerControllerComponent,
+  CombatStateComponent,
 } from './components.js';
-import { Vec2, lerp, wrapAngle } from '../core/math.js';
+import { Vec2, lerp, wrapAngle, clamp } from '../core/math.js';
 import { SpatialHashGrid }       from '../physics/spatial_hash.js';
 import { testCollision }         from '../physics/narrowphase.js';
 import { CollisionResolver }     from '../physics/resolver.js';
+import { computeBlueFlockSteering, computeCrimsonHunterSteering } from '../ai/behaviors.js';
 
 // ─────────────────────────────────────────────────────────────
 //  MovementSystem
@@ -29,16 +35,6 @@ import { CollisionResolver }     from '../physics/resolver.js';
 
 /**
  * Integrates acceleration → velocity → position each fixed physics tick.
- *
- * Pipeline per entity:
- *  1. Snapshot previous transform (for interpolation).
- *  2. Clamp acceleration to maxForce.
- *  3. Add acceleration to velocity.
- *  4. Apply drag.
- *  5. Clamp velocity to maxSpeed.
- *  6. Integrate position.
- *  7. Update rotation to match velocity heading (if moving).
- *  8. Reset acceleration accumulator.
  */
 export class MovementSystem {
   get componentTypes() {
@@ -73,17 +69,22 @@ export class MovementSystem {
       // 5. Clamp speed
       kin.velocity.clampMag(kin.maxSpeed);
 
-      // 6. Integrate position  (v is px/s, multiply by dt)
+      // 6. Integrate position (v is px/s, multiply by dt)
       tf.position.x += kin.velocity.x * dt;
       tf.position.y += kin.velocity.y * dt;
 
-      // 7. Update heading from velocity (only if moving meaningfully)
-      const speedSq = kin.velocity.magSq();
-      if (speedSq > 0.5) {
-        const targetHeading = kin.velocity.heading();
-        tf.rotation = wrapAngle(
-          tf.rotation + wrapAngle(targetHeading - tf.rotation) * 0.25
-        );
+      // 7. Update heading from velocity unless player is in manual control
+      const playerCtrl = entity.get(PlayerControllerComponent);
+      const isManual = playerCtrl && playerCtrl.isManualControlled;
+
+      if (!isManual) {
+        const speedSq = kin.velocity.magSq();
+        if (speedSq > 0.5) {
+          const targetHeading = kin.velocity.heading();
+          tf.rotation = wrapAngle(
+            tf.rotation + wrapAngle(targetHeading - tf.rotation) * 0.25
+          );
+        }
       }
 
       // 8. Reset acceleration
@@ -161,55 +162,42 @@ export class BoundarySystem {
 }
 
 // ─────────────────────────────────────────────────────────────
-//  CollisionSystem  (Phase 2)
+//  CollisionSystem  (Phase 2 & 3)
 // ─────────────────────────────────────────────────────────────
 
 /**
  * Broadphase (SpatialHashGrid) + Narrowphase + Impulse Resolution.
- *
- * Each fixedUpdate:
- *  1. Rebuild spatial hash with every collidable entity's AABB.
- *  2. Retrieve candidate pairs from shared cells.
- *  3. Run narrow-phase manifold test for each pair.
- *  4. Emit 'collision:enter' / 'collision:stay' on the EventBus.
- *  5. Apply physics response via CollisionResolver.
- *  6. Decay collision flash timers on ColliderComponents.
  */
 export class CollisionSystem {
   /**
    * @param {object} [opts]
-   * @param {import('../core/events.js').EventBus} [opts.bus]       - Optional EventBus for events
-   * @param {number}  [opts.cellSize=48]                            - Spatial hash cell size
-   * @param {number}  [opts.velocityThreshold=60]                   - Min impact speed for flash
+   * @param {import('../core/events.js').EventBus} [opts.bus]
+   * @param {number}  [opts.cellSize=48]
+   * @param {number}  [opts.velocityThreshold=55]
    */
-  constructor({ bus = null, cellSize = 48, velocityThreshold = 60 } = {}) {
+  constructor({ bus = null, cellSize = 48, velocityThreshold = 55 } = {}) {
     this._bus               = bus;
     this._grid              = new SpatialHashGrid({ cellSize });
     this._resolver          = new CollisionResolver();
     this._velocityThreshold = velocityThreshold;
 
-    // Diagnostics (read by HUD)
-    this.lastBroadphasePairs   = 0;
-    this.lastNarrowphaseHits   = 0;
-    this.lastSolveMsec         = 0;
-    this.lastGridOccupancy     = 0;
+    // Diagnostics
+    this.lastBroadphasePairs = 0;
+    this.lastNarrowphaseHits = 0;
+    this.lastSolveMsec       = 0;
+    this.lastGridOccupancy   = 0;
   }
 
   get componentTypes() {
     return [TransformComponent, ColliderComponent];
   }
 
-  /**
-   * @param {import('./entity.js').Entity[]} entities
-   * @param {number}                         _dt
-   * @param {import('./world.js').World}      world
-   */
   fixedUpdate(entities, _dt, world) {
     const t0 = performance.now();
     const grid = this._grid;
     grid.clear();
 
-    // 1. Insert all entities into spatial hash
+    // 1. Insert all collidable entities
     for (const entity of entities) {
       const tf  = entity.get(TransformComponent);
       const col = entity.get(ColliderComponent);
@@ -219,13 +207,13 @@ export class CollisionSystem {
 
     this.lastGridOccupancy = grid.occupiedBuckets;
 
-    // 2. Get candidate pairs
+    // 2. Candidate pairs from shared cells
     const pairs = grid.getCandidatePairs();
     this.lastBroadphasePairs = pairs.length;
 
     let hits = 0;
 
-    // 3. Narrow-phase + resolution
+    // 3. Narrowphase + resolution
     for (const [idA, idB] of pairs) {
       const entityA = world.getEntity(idA);
       const entityB = world.getEntity(idB);
@@ -235,7 +223,7 @@ export class CollisionSystem {
       const colB = entityB.get(ColliderComponent);
       if (!colA || !colB) continue;
 
-      // Collision layer filter
+      // Filter layer mask
       if (!(colA.layer & colB.mask) || !(colB.layer & colA.mask)) continue;
 
       const tfA = entityA.get(TransformComponent);
@@ -246,10 +234,10 @@ export class CollisionSystem {
 
       hits++;
 
-      // 4. Emit events
+      // Emit events
       this._emitCollisionEvents(entityA, entityB, colA, colB, manifold);
 
-      // 5. Physics response
+      // Physics response
       if (!colA.isTrigger && !colB.isTrigger) {
         this._resolver.resolve(
           entityA, entityB, manifold,
@@ -258,18 +246,18 @@ export class CollisionSystem {
           e => e.get(RigidBodyComponent),
         );
 
-        // Trigger flash on high-velocity collision
+        // Flash timer on impact
         const kinA = entityA.get(KinematicsComponent);
         const kinB = entityB.get(KinematicsComponent);
         const impactSpeed = this._relativeSpeed(kinA, kinB);
         if (impactSpeed > this._velocityThreshold) {
-          if (colA) colA.flashTimer = Math.min(0.12, impactSpeed / 800);
-          if (colB) colB.flashTimer = Math.min(0.12, impactSpeed / 800);
+          if (colA) colA.flashTimer = Math.min(0.14, impactSpeed / 700);
+          if (colB) colB.flashTimer = Math.min(0.14, impactSpeed / 700);
         }
       }
     }
 
-    // 6. Decay flash timers
+    // 4. Decay flash timers
     for (const entity of entities) {
       const col = entity.get(ColliderComponent);
       if (col.flashTimer > 0) col.flashTimer -= _dt;
@@ -279,38 +267,303 @@ export class CollisionSystem {
     this.lastSolveMsec = performance.now() - t0;
   }
 
-  // ── Helpers ───────────────────────────────────────────────
-
   _emitCollisionEvents(entityA, entityB, colA, colB, manifold) {
     if (!this._bus) return;
     const isNew = !colA.activeContacts.has(entityB.id);
     if (isNew) {
       colA.activeContacts.add(entityB.id);
       colB.activeContacts.add(entityA.id);
-      this._bus.emit('collision:enter', { idA: entityA.id, idB: entityB.id, manifold });
+      this._bus.emit('collision:enter', { idA: entityA.id, idB: entityB.id, manifold, entityA, entityB });
     } else {
-      this._bus.emit('collision:stay', { idA: entityA.id, idB: entityB.id, manifold });
+      this._bus.emit('collision:stay', { idA: entityA.id, idB: entityB.id, manifold, entityA, entityB });
     }
   }
 
-  /**
-   * Relative speed between two kinematic components.
-   * @param {KinematicsComponent|undefined} kinA
-   * @param {KinematicsComponent|undefined} kinB
-   * @returns {number}
-   */
   _relativeSpeed(kinA, kinB) {
     const dvx = (kinA?.velocity.x ?? 0) - (kinB?.velocity.x ?? 0);
     const dvy = (kinA?.velocity.y ?? 0) - (kinB?.velocity.y ?? 0);
     return Math.sqrt(dvx * dvx + dvy * dvy);
   }
 
-  /** Expose the grid for debug rendering. */
   get grid() { return this._grid; }
 }
 
 // ─────────────────────────────────────────────────────────────
-//  RenderSystem  (Phase 2 — with debug wireframe mode)
+//  BoidSystem  (Phase 3)
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * Autonomous Craig Reynolds boid flocking and predator-prey dynamics.
+ * Uses a dedicated SpatialHashGrid to accelerate neighbor perception.
+ */
+export class BoidSystem {
+  /**
+   * @param {object} [opts]
+   * @param {number} [opts.gridCellSize=64]
+   */
+  constructor({ gridCellSize = 64 } = {}) {
+    this._grid = new SpatialHashGrid({ cellSize: gridCellSize });
+    this._steerForce = new Vec2();
+  }
+
+  get componentTypes() {
+    return [TransformComponent, KinematicsComponent, BoidComponent];
+  }
+
+  /**
+   * @param {import('./entity.js').Entity[]} entities
+   * @param {number}                         dt
+   * @param {import('./world.js').World}      world
+   */
+  fixedUpdate(entities, dt, world) {
+    const grid = this._grid;
+    grid.clear();
+
+    // 1. Insert boid positions into spatial grid for radius queries
+    for (let i = 0; i < entities.length; i++) {
+      const e = entities[i];
+      const tf = e.get(TransformComponent);
+      grid.insert(e.id, {
+        minX: tf.position.x - 4,
+        minY: tf.position.y - 4,
+        maxX: tf.position.x + 4,
+        maxY: tf.position.y + 4,
+      });
+    }
+
+    // 2. Compute steering for each autonomous boid
+    for (let i = 0; i < entities.length; i++) {
+      const entity = entities[i];
+
+      // If player is in manual flight mode, skip AI steering
+      const playerCtrl = entity.get(PlayerControllerComponent);
+      if (playerCtrl && playerCtrl.isManualControlled) {
+        continue;
+      }
+
+      const tf   = entity.get(TransformComponent);
+      const kin  = entity.get(KinematicsComponent);
+      const boid = entity.get(BoidComponent);
+
+      // Query neighbors within boid's perception radius
+      const neighborIds = grid.queryRadius(tf.position, boid.perceptionRadius);
+      const flockmates  = [];
+      const enemies     = [];
+
+      for (const id of neighborIds) {
+        if (id === entity.id) continue;
+        const other = world.getEntity(id);
+        if (!other || other.destroyed) continue;
+
+        const otherTf   = other.get(TransformComponent);
+        const otherKin  = other.get(KinematicsComponent);
+        const otherBoid = other.get(BoidComponent);
+        if (!otherTf) continue;
+
+        const neighborData = {
+          position: otherTf.position,
+          velocity: otherKin ? otherKin.velocity : null,
+          flockType: otherBoid ? otherBoid.flockType : 'neutral',
+        };
+
+        if (otherBoid && otherBoid.flockType === boid.flockType) {
+          flockmates.push(neighborData);
+        } else if (otherBoid) {
+          enemies.push(neighborData);
+        }
+      }
+
+      if (boid.flockType === 'blue') {
+        computeBlueFlockSteering(
+          tf.position,
+          kin.velocity,
+          flockmates,
+          enemies,
+          boid.separationRadius,
+          boid.maxSpeed,
+          boid.maxForce,
+          this._steerForce
+        );
+      } else if (boid.flockType === 'crimson') {
+        boid.wanderAngle += (Math.random() - 0.5) * 0.45;
+        computeCrimsonHunterSteering(
+          tf.position,
+          kin.velocity,
+          flockmates,
+          enemies,
+          boid.wanderAngle,
+          boid.separationRadius,
+          boid.maxSpeed,
+          boid.maxForce,
+          this._steerForce
+        );
+      }
+
+      kin.applyForce(this._steerForce);
+    }
+  }
+
+  get grid() { return this._grid; }
+}
+
+// ─────────────────────────────────────────────────────────────
+//  PlayerInputSystem  (Phase 3)
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * Handles keyboard flight controls (WASD / Arrows) and cursor targeting.
+ * Toggles between [AUTO SWARM] and [MANUAL PILOT] with KeyM.
+ */
+export class PlayerInputSystem {
+  /**
+   * @param {object} [opts]
+   * @param {import('../core/viewport.js').Viewport} [opts.viewport]
+   * @param {import('../core/events.js').EventBus} [opts.bus]
+   */
+  constructor({ viewport = null, bus = null } = {}) {
+    this.viewport = viewport;
+    this.bus      = bus;
+
+    this.keys = {
+      forward:  false,
+      backward: false,
+      left:     false,
+      right:    false,
+    };
+
+    this.mouseCanvasPos = new Vec2(0, 0);
+    this._thrust = new Vec2();
+
+    this._onKeyDown   = this._handleKeyDown.bind(this);
+    this._onKeyUp     = this._handleKeyUp.bind(this);
+    this._onMouseMove = this._handleMouseMove.bind(this);
+
+    if (typeof window !== 'undefined') {
+      window.addEventListener('keydown', this._onKeyDown);
+      window.addEventListener('keyup', this._onKeyUp);
+      window.addEventListener('mousemove', this._onMouseMove);
+    }
+  }
+
+  get componentTypes() {
+    return [TransformComponent, KinematicsComponent, PlayerControllerComponent];
+  }
+
+  _handleKeyDown(e) {
+    if (e.target !== document.body && e.target !== document.documentElement) return;
+
+    if (e.code === 'KeyW' || e.code === 'ArrowUp')    this.keys.forward  = true;
+    if (e.code === 'KeyS' || e.code === 'ArrowDown')  this.keys.backward = true;
+    if (e.code === 'KeyA' || e.code === 'ArrowLeft')  this.keys.left     = true;
+    if (e.code === 'KeyD' || e.code === 'ArrowRight') this.keys.right    = true;
+
+    if (e.code === 'KeyM') {
+      this.toggleMode();
+    }
+  }
+
+  _handleKeyUp(e) {
+    if (e.code === 'KeyW' || e.code === 'ArrowUp')    this.keys.forward  = false;
+    if (e.code === 'KeyS' || e.code === 'ArrowDown')  this.keys.backward = false;
+    if (e.code === 'KeyA' || e.code === 'ArrowLeft')  this.keys.left     = false;
+    if (e.code === 'KeyD' || e.code === 'ArrowRight') this.keys.right    = false;
+  }
+
+  _handleMouseMove(e) {
+    if (this.viewport) {
+      const p = this.viewport.eventToCanvas(e);
+      this.mouseCanvasPos.set(p.x, p.y);
+    } else {
+      this.mouseCanvasPos.set(e.clientX, e.clientY);
+    }
+  }
+
+  toggleMode(entities = null) {
+    if (this.bus) {
+      this.bus.emit('player:modeToggle');
+    }
+  }
+
+  /**
+   * @param {import('./entity.js').Entity[]} entities
+   * @param {number}                         dt
+   */
+  fixedUpdate(entities, dt) {
+    for (let i = 0; i < entities.length; i++) {
+      const entity = entities[i];
+      const ctrl = entity.get(PlayerControllerComponent);
+      const tf   = entity.get(TransformComponent);
+      const kin  = entity.get(KinematicsComponent);
+
+      ctrl.cursorPosition.copyFrom(this.mouseCanvasPos);
+      ctrl.thrustForward  = this.keys.forward;
+      ctrl.thrustBackward = this.keys.backward;
+      ctrl.strafeLeft     = this.keys.left;
+      ctrl.strafeRight    = this.keys.right;
+
+      if (!ctrl.isManualControlled) {
+        ctrl.thrusterActive = Math.max(0, ctrl.thrusterActive - dt * 2.5);
+        continue;
+      }
+
+      // 1. Aim heading towards mouse cursor
+      const dx = ctrl.cursorPosition.x - tf.position.x;
+      const dy = ctrl.cursorPosition.y - tf.position.y;
+      if (dx * dx + dy * dy > 4) {
+        const targetRot = Math.atan2(dy, dx);
+        const diff = wrapAngle(targetRot - tf.rotation);
+        tf.rotation = wrapAngle(tf.rotation + diff * Math.min(1, ctrl.turnRate * dt));
+      }
+
+      // 2. Directional thruster integration
+      this._thrust.reset();
+      const fwdX = Math.cos(tf.rotation);
+      const fwdY = Math.sin(tf.rotation);
+      const rightX = -fwdY;
+      const rightY = fwdX;
+
+      let isThrusting = false;
+      if (ctrl.thrustForward) {
+        this._thrust.x += fwdX * ctrl.thrustForce;
+        this._thrust.y += fwdY * ctrl.thrustForce;
+        isThrusting = true;
+      }
+      if (ctrl.thrustBackward) {
+        this._thrust.x -= fwdX * ctrl.thrustForce * 0.55;
+        this._thrust.y -= fwdY * ctrl.thrustForce * 0.55;
+        isThrusting = true;
+      }
+      if (ctrl.strafeLeft) {
+        this._thrust.x -= rightX * ctrl.thrustForce * 0.7;
+        this._thrust.y -= rightY * ctrl.thrustForce * 0.7;
+        isThrusting = true;
+      }
+      if (ctrl.strafeRight) {
+        this._thrust.x += rightX * ctrl.thrustForce * 0.7;
+        this._thrust.y += rightY * ctrl.thrustForce * 0.7;
+        isThrusting = true;
+      }
+
+      if (isThrusting) {
+        ctrl.thrusterActive = Math.min(1, ctrl.thrusterActive + dt * 6);
+        kin.applyForce(this._thrust);
+      } else {
+        ctrl.thrusterActive = Math.max(0, ctrl.thrusterActive - dt * 3.5);
+      }
+    }
+  }
+
+  destroy() {
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('keydown', this._onKeyDown);
+      window.removeEventListener('keyup', this._onKeyUp);
+      window.removeEventListener('mousemove', this._onMouseMove);
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+//  RenderSystem  (Phase 3 — with custom ship sprites & crosshair)
 // ─────────────────────────────────────────────────────────────
 
 const _FLASH_COLOR_BLUE    = '#ffffff';
@@ -318,19 +571,22 @@ const _FLASH_COLOR_CRIMSON = '#ffee00';
 const _DEBUG_GRID_STYLE    = 'rgba(0, 255, 231, 0.08)';
 const _DEBUG_COLLIDER_OK   = 'rgba(0, 255, 100, 0.55)';
 const _DEBUG_COLLIDER_HIT  = 'rgba(255, 50, 50, 0.90)';
-const _DEBUG_NORMAL_COLOR  = 'rgba(255, 220, 0, 0.85)';
+const _CROSSHAIR_AMBER     = 'rgba(255, 196, 0, 0.85)';
 
 export class RenderSystem {
   /**
    * @param {object} [opts]
-   * @param {boolean} [opts.debugWireframe=false] - Show collider/grid overlays
+   * @param {boolean} [opts.debugWireframe=false]
    * @param {import('../physics/spatial_hash.js').SpatialHashGrid|null} [opts.grid]
    * @param {import('../core/viewport.js').Viewport|null} [opts.viewport]
    */
   constructor({ debugWireframe = false, grid = null, viewport = null } = {}) {
     this.debugWireframe = debugWireframe;
-    this.grid      = grid;
-    this.viewport  = viewport;
+    this.grid     = grid;
+    this.viewport = viewport;
+
+    // Crosshair animation rotation
+    this._crosshairSpin = 0;
   }
 
   get componentTypes() {
@@ -338,10 +594,12 @@ export class RenderSystem {
   }
 
   render(entities, ctx, alpha) {
-    // Optional spatial grid debug overlay (drawn behind entities)
+    // Optional spatial grid debug overlay
     if (this.debugWireframe && this.grid && this.viewport) {
       this._drawGrid(ctx);
     }
+
+    let activeManualPlayer = null;
 
     for (const entity of entities) {
       const tf  = entity.get(TransformComponent);
@@ -349,13 +607,19 @@ export class RenderSystem {
 
       if (!rc.visible || rc.alpha <= 0) continue;
 
+      // Check if entity is player controller
+      const playerCtrl = entity.get(PlayerControllerComponent);
+      if (playerCtrl?.isManualControlled) {
+        activeManualPlayer = { tf, ctrl: playerCtrl };
+      }
+
       // Interpolated transform
       const x   = lerp(tf.prevPosition.x, tf.position.x, alpha);
       const y   = lerp(tf.prevPosition.y, tf.position.y, alpha);
       const rot = lerp(tf.prevRotation,   tf.rotation,   alpha);
       const sz  = rc.size * tf.scale;
 
-      // Collision flash override
+      // Collision flash
       const col        = entity.get(ColliderComponent);
       const isFlashing = col && col.flashTimer > 0;
       const flashT     = isFlashing ? Math.min(1, col.flashTimer / 0.12) : 0;
@@ -365,8 +629,14 @@ export class RenderSystem {
       ctx.translate(x, y);
       ctx.rotate(rot);
 
-      // Glow — amplified during flash
-      const glowRadius = isFlashing ? rc.glow + flashT * 20 : rc.glow;
+      // Dual-engine thruster flames for flagship
+      if (rc.shape === 'flagship') {
+        const thrusterPower = playerCtrl ? playerCtrl.thrusterActive : 0.4;
+        this._drawThrusterFlames(ctx, sz, thrusterPower);
+      }
+
+      // Glow — amplified during collision flash
+      const glowRadius = isFlashing ? rc.glow + flashT * 22 : rc.glow;
       if (glowRadius > 0) {
         ctx.shadowBlur  = glowRadius;
         ctx.shadowColor = isFlashing ? '#ffffff' : rc.color;
@@ -377,32 +647,225 @@ export class RenderSystem {
       // Color — lerp towards white on flash
       ctx.fillStyle   = isFlashing ? this._lerpColor(rc.color, '#ffffff', flashT * 0.7) : rc.color;
       ctx.strokeStyle = ctx.fillStyle;
-      ctx.lineWidth   = 1;
+      ctx.lineWidth   = 1.2;
 
       ctx.beginPath();
       switch (rc.shape) {
-        case 'triangle': this._drawTriangle(ctx, sz); break;
-        case 'circle':   this._drawCircle(ctx, sz);   break;
-        case 'diamond':  this._drawDiamond(ctx, sz);  break;
-        default:         this._drawTriangle(ctx, sz);
+        case 'arrowhead':
+          this._drawArrowhead(ctx, sz);
+          break;
+        case 'spiked_diamond':
+          this._drawSpikedDiamond(ctx, sz);
+          break;
+        case 'flagship':
+          this._drawFlagship(ctx, sz);
+          break;
+        case 'diamond':
+          this._drawDiamond(ctx, sz);
+          break;
+        case 'circle':
+          this._drawCircle(ctx, sz);
+          break;
+        case 'triangle':
+        default:
+          this._drawTriangle(ctx, sz);
+          break;
       }
       ctx.closePath();
       ctx.fill();
 
       ctx.shadowBlur = 0;
-      ctx.globalAlpha = rc.alpha * 0.5;
+      ctx.globalAlpha = rc.alpha * 0.6;
       ctx.stroke();
 
       ctx.restore();
 
-      // Debug: collider wireframe overlay (drawn in world space, not rotated)
+      // Debug: collider wireframe overlay
       if (this.debugWireframe && col) {
         this._drawColliderWireframe(ctx, entity, tf, col, isFlashing, x, y, alpha);
       }
     }
+
+    // Render interactive targeting crosshair when in Manual Pilot mode
+    if (activeManualPlayer && this.viewport) {
+      this._crosshairSpin += 0.025;
+      this._drawCrosshair(ctx, activeManualPlayer.ctrl.cursorPosition, activeManualPlayer.tf.position);
+    }
   }
 
-  // ── Debug: spatial grid lines ─────────────────────────────
+  // ── Ship Sprite Path Builders ─────────────────────────────
+
+  /**
+   * Sleek aerodynamic arrowhead (Blue swarm flocker).
+   */
+  _drawArrowhead(ctx, sz) {
+    ctx.moveTo(sz * 1.5,  0);          // front nose
+    ctx.lineTo(-sz * 0.85, sz * 0.75); // bottom wingtip
+    ctx.lineTo(-sz * 0.35, 0);         // center rear engine cavity
+    ctx.lineTo(-sz * 0.85, -sz * 0.75); // top wingtip
+  }
+
+  /**
+   * Aggressive spiked diamond with menacing barb fins (Crimson hunter).
+   */
+  _drawSpikedDiamond(ctx, sz) {
+    ctx.moveTo(sz * 1.7,  0);          // sharp front beak
+    ctx.lineTo(sz * 0.2,  sz * 0.5);   // mid flank
+    ctx.lineTo(-sz * 0.2, sz * 1.25);  // razor barb wingtip
+    ctx.lineTo(-sz * 0.5, sz * 0.35);  // inner waist
+    ctx.lineTo(-sz * 1.3, 0);          // tail stinger
+    ctx.lineTo(-sz * 0.5, -sz * 0.35); // inner waist
+    ctx.lineTo(-sz * 0.2, -sz * 1.25); // razor barb wingtip
+    ctx.lineTo(sz * 0.2,  -sz * 0.5);  // mid flank
+  }
+
+  /**
+   * Dual-engine heavy flagship / fighter (Player flagship).
+   */
+  _drawFlagship(ctx, sz) {
+    ctx.moveTo(sz * 1.9,  0);           // cockpit nose
+    ctx.lineTo(sz * 0.9,  sz * 0.4);   // canopy shoulder
+    ctx.lineTo(-sz * 0.1, sz * 1.4);   // main wing tip
+    ctx.lineTo(-sz * 0.6, sz * 1.15);  // wing trailing
+    ctx.lineTo(-sz * 0.5, sz * 0.5);   // right nacelle outer
+    ctx.lineTo(-sz * 1.2, sz * 0.5);   // right nozzle outer
+    ctx.lineTo(-sz * 1.2, sz * 0.2);   // right nozzle inner
+    ctx.lineTo(-sz * 0.8, 0);          // fuselage center keel
+    ctx.lineTo(-sz * 1.2, -sz * 0.2);  // left nozzle inner
+    ctx.lineTo(-sz * 1.2, -sz * 0.5);  // left nozzle outer
+    ctx.lineTo(-sz * 0.5, -sz * 0.5);  // left nacelle outer
+    ctx.lineTo(-sz * 0.6, -sz * 1.15); // left wing trailing
+    ctx.lineTo(-sz * 0.1, -sz * 1.4);  // left wing tip
+    ctx.lineTo(sz * 0.9,  -sz * 0.4);  // canopy shoulder
+  }
+
+  /**
+   * Twin exhaust flames behind flagship engines.
+   */
+  _drawThrusterFlames(ctx, sz, power) {
+    if (power <= 0.05) return;
+
+    const flicker = 0.8 + Math.random() * 0.4;
+    const flameLen = sz * (1.2 + power * 1.8) * flicker;
+    const flameWidth = sz * 0.22;
+
+    ctx.save();
+    ctx.shadowBlur = 15;
+    ctx.shadowColor = '#00ffe7';
+    ctx.fillStyle = '#00ffe7';
+
+    // Right engine flame
+    ctx.beginPath();
+    ctx.moveTo(-sz * 1.2, sz * 0.48);
+    ctx.lineTo(-sz * 1.2 - flameLen, sz * 0.35);
+    ctx.lineTo(-sz * 1.2, sz * 0.22);
+    ctx.closePath();
+    ctx.fill();
+
+    // Left engine flame
+    ctx.beginPath();
+    ctx.moveTo(-sz * 1.2, -0.22);
+    ctx.lineTo(-sz * 1.2 - flameLen, -sz * 0.35);
+    ctx.lineTo(-sz * 1.2, -0.48);
+    ctx.closePath();
+    ctx.fill();
+
+    // Inner bright white flame core
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.moveTo(-sz * 1.2, sz * 0.42);
+    ctx.lineTo(-sz * 1.2 - flameLen * 0.5, sz * 0.35);
+    ctx.lineTo(-sz * 1.2, sz * 0.28);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.moveTo(-sz * 1.2, -0.28);
+    ctx.lineTo(-sz * 1.2 - flameLen * 0.5, -sz * 0.35);
+    ctx.lineTo(-sz * 1.2, -0.42);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.restore();
+  }
+
+  /**
+   * Draw interactive targeting crosshair at mouse coordinates.
+   */
+  _drawCrosshair(ctx, cursor, shipPos) {
+    const cx = cursor.x;
+    const cy = cursor.y;
+
+    ctx.save();
+    ctx.strokeStyle = _CROSSHAIR_AMBER;
+    ctx.fillStyle   = _CROSSHAIR_AMBER;
+    ctx.lineWidth   = 1.5;
+    ctx.shadowBlur  = 10;
+    ctx.shadowColor = _CROSSHAIR_AMBER;
+
+    // Line from ship to crosshair
+    ctx.save();
+    ctx.setLineDash([3, 5]);
+    ctx.strokeStyle = 'rgba(255, 196, 0, 0.25)';
+    ctx.lineWidth   = 1;
+    ctx.beginPath();
+    ctx.moveTo(shipPos.x, shipPos.y);
+    ctx.lineTo(cx, cy);
+    ctx.stroke();
+    ctx.restore();
+
+    // Rotating outer reticle brackets
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(this._crosshairSpin);
+
+    const r = 16;
+    const arcLen = Math.PI / 4;
+    for (let i = 0; i < 4; i++) {
+      const startAngle = i * (Math.PI / 2) - arcLen / 2;
+      ctx.beginPath();
+      ctx.arc(0, 0, r, startAngle, startAngle + arcLen);
+      ctx.stroke();
+    }
+
+    // Tick markers
+    const tStart = 19;
+    const tEnd   = 24;
+    for (let i = 0; i < 4; i++) {
+      const angle = i * (Math.PI / 2);
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(angle) * tStart, Math.sin(angle) * tStart);
+      ctx.lineTo(Math.cos(angle) * tEnd,   Math.sin(angle) * tEnd);
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    // Center pip
+    ctx.beginPath();
+    ctx.arc(cx, cy, 2, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.restore();
+  }
+
+  // ── Primitives & Helpers ──────────────────────────────────
+
+  _drawTriangle(ctx, sz) {
+    ctx.moveTo( sz * 1.4,  0);
+    ctx.lineTo(-sz * 0.9,  sz * 0.8);
+    ctx.lineTo(-sz * 0.9, -sz * 0.8);
+  }
+
+  _drawCircle(ctx, sz) {
+    ctx.arc(0, 0, sz, 0, Math.PI * 2);
+  }
+
+  _drawDiamond(ctx, sz) {
+    ctx.moveTo( sz * 1.2,  0);
+    ctx.lineTo( 0,         sz);
+    ctx.lineTo(-sz * 1.2,  0);
+    ctx.lineTo( 0,        -sz);
+  }
 
   _drawGrid(ctx) {
     if (!this.viewport) return;
@@ -427,8 +890,6 @@ export class RenderSystem {
     ctx.restore();
   }
 
-  // ── Debug: collider wireframes ────────────────────────────
-
   _drawColliderWireframe(ctx, entity, tf, col, isFlashing, ix, iy, _alpha) {
     const shape = col.shape;
     const s     = tf.scale;
@@ -449,12 +910,10 @@ export class RenderSystem {
       ctx.arc(cx, cy, r, 0, Math.PI * 2);
       ctx.stroke();
 
-      // Center cross
       ctx.beginPath();
       ctx.moveTo(cx - 3, cy); ctx.lineTo(cx + 3, cy);
       ctx.moveTo(cx, cy - 3); ctx.lineTo(cx, cy + 3);
       ctx.stroke();
-
     } else if (shape.type === 'box') {
       const hw = shape.halfWidth  * s;
       const hh = shape.halfHeight * s;
@@ -466,35 +925,6 @@ export class RenderSystem {
     ctx.restore();
   }
 
-  // ── Shape helpers ─────────────────────────────────────────
-
-  _drawTriangle(ctx, sz) {
-    ctx.moveTo( sz * 1.4,  0);
-    ctx.lineTo(-sz * 0.9,  sz * 0.8);
-    ctx.lineTo(-sz * 0.9, -sz * 0.8);
-  }
-
-  _drawCircle(ctx, sz) {
-    ctx.arc(0, 0, sz, 0, Math.PI * 2);
-  }
-
-  _drawDiamond(ctx, sz) {
-    ctx.moveTo( sz * 1.2,  0);
-    ctx.lineTo( 0,         sz);
-    ctx.lineTo(-sz * 1.2,  0);
-    ctx.lineTo( 0,        -sz);
-  }
-
-  // ── Color blend helper ────────────────────────────────────
-
-  /**
-   * Very fast hex-color lerp for flash effects.
-   * Only handles full 6-digit #rrggbb strings.
-   * @param {string} a
-   * @param {string} b
-   * @param {number} t [0,1]
-   * @returns {string}
-   */
   _lerpColor(a, b, t) {
     const ah = parseInt(a.slice(1), 16);
     const bh = parseInt(b.slice(1), 16);
@@ -511,13 +941,8 @@ export class RenderSystem {
 //  WanderSystem
 // ─────────────────────────────────────────────────────────────
 
-/** Reusable scratch vector — avoids per-frame allocation. */
 const _steer = new Vec2();
 
-/**
- * Simple wander behaviour: agents with mode='roam' periodically change
- * heading by applying a random steering force.
- */
 export class WanderSystem {
   /**
    * @param {object} [opts]
@@ -540,9 +965,11 @@ export class WanderSystem {
 
       if (state.mode !== 'roam') continue;
 
-      // Skip static bodies
       const rb = entity.get(RigidBodyComponent);
       if (rb?.isStatic) continue;
+
+      // Entities with BoidComponent have their own steering
+      if (entity.has(BoidComponent)) continue;
 
       state.wanderTimer -= dt;
       if (state.wanderTimer <= 0) {

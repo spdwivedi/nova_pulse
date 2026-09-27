@@ -1,6 +1,6 @@
 /**
  * @file components.js
- * @description Core ECS components for NovaPulse (Phase 1 & 2).
+ * @description Core ECS components for NovaPulse (Phase 1, 2, & 3).
  *
  * Components are plain data containers — no methods beyond a simple reset().
  * All numeric fields use typed-array-friendly primitives for future
@@ -15,6 +15,10 @@
  *  Phase 2:
  *  - ColliderComponent    — shape type, isTrigger, collision layer/mask
  *  - RigidBodyComponent   — mass, restitution, friction, isStatic flag
+ *  Phase 3:
+ *  - BoidComponent        — flockType, perceptionRadius, separationRadius, maxForce, maxSpeed
+ *  - PlayerControllerComponent — thrustForce, turnRate, damping, isManualControlled
+ *  - CombatStateComponent — health, maxHealth, energy, isTargeted
  */
 
 import { Vec2 } from '../core/math.js';
@@ -256,3 +260,120 @@ export class RigidBodyComponent {
     this.friction    = friction;
   }
 }
+
+// ─────────────────────────────────────────────────────────────
+//  BoidComponent  (Phase 3)
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * Stores autonomous flocking parameters and steering constraints.
+ *
+ * @typedef {'blue' | 'crimson'} FlockType
+ */
+export class BoidComponent {
+  /**
+   * @param {object} [opts]
+   * @param {FlockType} [opts.flockType='blue']
+   * @param {number}    [opts.perceptionRadius=85]  - Distance to perceive flockmates/enemies
+   * @param {number}    [opts.separationRadius=32]  - Distance to maintain between neighbors
+   * @param {number}    [opts.maxForce=180]         - Maximum steering force applied per tick
+   * @param {number}    [opts.maxSpeed=160]         - Desired cruising speed
+   */
+  constructor({
+    flockType        = 'blue',
+    perceptionRadius = 85,
+    separationRadius = 32,
+    maxForce         = 180,
+    maxSpeed         = 160,
+  } = {}) {
+    this.flockType        = flockType;
+    this.perceptionRadius = perceptionRadius;
+    this.separationRadius = separationRadius;
+    this.maxForce         = maxForce;
+    this.maxSpeed         = maxSpeed;
+
+    /** Internal wander angle accumulator for hunter wandering */
+    this.wanderAngle = Math.random() * Math.PI * 2;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+//  PlayerControllerComponent  (Phase 3)
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * Controller configuration for manual player piloting or flagship behavior.
+ */
+export class PlayerControllerComponent {
+  /**
+   * @param {object} [opts]
+   * @param {number}  [opts.thrustForce=280]      - Engine acceleration force
+   * @param {number}  [opts.turnRate=8]           - Radians per second alignment speed
+   * @param {number}  [opts.damping=0.96]         - Inertial velocity damping
+   * @param {boolean} [opts.isManualControlled=false] - True if manual player control is active
+   */
+  constructor({
+    thrustForce        = 280,
+    turnRate           = 8,
+    damping            = 0.96,
+    isManualControlled = false,
+  } = {}) {
+    this.thrustForce        = thrustForce;
+    this.turnRate           = turnRate;
+    this.damping            = damping;
+    this.isManualControlled = isManualControlled;
+
+    /** Input state flags (populated by PlayerInputSystem) */
+    this.thrustForward  = false;
+    this.thrustBackward = false;
+    this.strafeLeft     = false;
+    this.strafeRight    = false;
+
+    /** World position of the mouse aim cursor */
+    this.cursorPosition = new Vec2();
+
+    /** Thruster flame particle intensity [0..1] */
+    this.thrusterActive = 0;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+//  CombatStateComponent  (Phase 3)
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * Tracks agent health, energy, and targeted status for combat interactions.
+ */
+export class CombatStateComponent {
+  /**
+   * @param {object} [opts]
+   * @param {number}  [opts.health=100]
+   * @param {number}  [opts.maxHealth=100]
+   * @param {number}  [opts.energy=100]
+   * @param {boolean} [opts.isTargeted=false]
+   */
+  constructor({
+    health     = 100,
+    maxHealth  = 100,
+    energy     = 100,
+    isTargeted = false,
+  } = {}) {
+    this.health     = health;
+    this.maxHealth  = maxHealth;
+    this.energy     = energy;
+    this.isTargeted = isTargeted;
+
+    /** Invulnerability or scatter burst timer after being hit */
+    this.hitCooldown = 0;
+  }
+
+  takeDamage(amount) {
+    this.health = Math.max(0, this.health - amount);
+    return this.health <= 0;
+  }
+
+  heal(amount) {
+    this.health = Math.min(this.maxHealth, this.health + amount);
+  }
+}
+
