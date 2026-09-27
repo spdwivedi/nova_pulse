@@ -1,5 +1,18 @@
 # Changelog
 
+### [2026-09-27 07:54 IST] feat(engine): initialize NovaPulse core and ECS architecture
+
+#### Key Highlights
+- Bootstrapped NovaPulse engine with a high-performance 2D Canvas architecture.
+- Implemented a robust ECS (Entity-Component-System) pattern for autonomous swarm simulation.
+- Added comprehensive unit testing for core mathematical and ECS logic.
+
+#### Files Modified
+CHANGELOG.md, index.html, package.json, src/core/events.js, src/core/loop.js, src/core/math.js, src/core/viewport.js, src/ecs/components.js, src/ecs/entity.js, src/ecs/systems.js
+
+#### Functional & Architectural Impact
+The initial release establishes a high-performance foundation for 2D simulations. By utilizing a bitmask-based ECS and a GC-friendly math library, the engine achieves efficient memory management and rapid entity processing. The inclusion of a high-precision requestAnimationFrame loop and Hi-DPI viewport scaling ensures smooth, responsive rendering across diverse display environments, providing a stable base for complex autonomous agent behaviors.
+
 ### [2026-09-27 07:40 IST] refactor(core): synchronize session changes across 0 file(s)
 
 #### Key Highlights
