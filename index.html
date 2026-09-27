@@ -3,20 +3,22 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>NovaPulse — Swarm Simulation Engine</title>
+  <title>NovaPulse — Swarm Simulation Engine Phase 2</title>
   <style>
     /* ── Reset ──────────────────────────────────────────── */
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     /* ── Root & body ────────────────────────────────────── */
     :root {
-      --cyan:    #00ffe7;
-      --crimson: #ff2d55;
-      --blue:    #00cfff;
-      --dim:     #0a0a12;
-      --hud-bg:  rgba(0, 0, 0, 0.55);
-      --hud-border: rgba(0, 255, 231, 0.18);
-      --font:    'Courier New', Courier, monospace;
+      --cyan:      #00ffe7;
+      --crimson:   #ff2d55;
+      --blue:      #00cfff;
+      --amber:     #ffc400;
+      --green:     #00ff88;
+      --dim:       #0a0a12;
+      --hud-bg:    rgba(4, 4, 14, 0.68);
+      --hud-border:rgba(0, 255, 231, 0.15);
+      --font:      'Courier New', Courier, monospace;
     }
 
     html, body {
@@ -45,18 +47,17 @@
         to bottom,
         transparent 0px,
         transparent 3px,
-        rgba(0, 0, 0, 0.08) 3px,
-        rgba(0, 0, 0, 0.08) 4px
+        rgba(0, 0, 0, 0.07) 3px,
+        rgba(0, 0, 0, 0.07) 4px
       );
-      animation: flicker 8s step-end infinite;
+      animation: flicker 9s step-end infinite;
     }
 
     @keyframes flicker {
-      0%, 95%, 100% { opacity: 1; }
-      96%           { opacity: 0.82; }
-      97%           { opacity: 1; }
-      98%           { opacity: 0.88; }
-      99%           { opacity: 1; }
+      0%, 94%, 100% { opacity: 1; }
+      95%           { opacity: 0.84; }
+      96.5%         { opacity: 1; }
+      98%           { opacity: 0.90; }
     }
 
     /* ── Vignette ───────────────────────────────────────── */
@@ -67,43 +68,44 @@
       z-index: 11;
       background: radial-gradient(
         ellipse at center,
-        transparent 55%,
-        rgba(0, 0, 0, 0.72) 100%
+        transparent 52%,
+        rgba(0, 0, 0, 0.76) 100%
       );
     }
 
     /* ── HUD overlay container ──────────────────────────── */
     #hud-overlay {
       position: fixed;
-      top: 18px;
-      left: 18px;
+      top: 16px;
+      left: 16px;
       z-index: 20;
       display: flex;
       flex-direction: column;
-      gap: 8px;
+      gap: 7px;
       pointer-events: none;
+      user-select: none;
     }
 
     /* ── HUD panel ──────────────────────────────────────── */
     .hud-panel {
       background: var(--hud-bg);
       border: 1px solid var(--hud-border);
-      border-radius: 4px;
-      padding: 10px 16px;
-      backdrop-filter: blur(6px);
-      -webkit-backdrop-filter: blur(6px);
-      min-width: 210px;
+      border-radius: 3px;
+      padding: 9px 14px;
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      min-width: 230px;
     }
 
     .hud-title {
       font-family: var(--font);
-      font-size: 9px;
+      font-size: 8.5px;
       font-weight: bold;
-      letter-spacing: 0.2em;
+      letter-spacing: 0.22em;
       text-transform: uppercase;
       color: var(--cyan);
       margin-bottom: 6px;
-      opacity: 0.7;
+      opacity: 0.65;
     }
 
     .hud-row {
@@ -111,31 +113,89 @@
       justify-content: space-between;
       align-items: baseline;
       font-family: var(--font);
-      font-size: 11px;
-      color: rgba(255, 255, 255, 0.55);
-      padding: 1px 0;
+      font-size: 10.5px;
+      color: rgba(255, 255, 255, 0.48);
+      padding: 1.5px 0;
     }
 
     .hud-row span.val {
-      color: var(--cyan);
-      font-size: 13px;
+      font-size: 12.5px;
       font-weight: bold;
+      letter-spacing: 0.05em;
+      color: var(--cyan);
+    }
+    .hud-row span.val.crimson { color: var(--crimson); }
+    .hud-row span.val.blue    { color: var(--blue);    }
+    .hud-row span.val.amber   { color: var(--amber);   }
+    .hud-row span.val.green   { color: var(--green);   }
+
+    /* ── Separator ──────────────────────────────────────── */
+    .hud-sep {
+      height: 1px;
+      background: var(--hud-border);
+      margin: 4px 0;
+    }
+
+    /* ── Hotkey hint panel ──────────────────────────────── */
+    .hud-hotkeys {
+      font-family: var(--font);
+      font-size: 9px;
+      color: rgba(255,255,255,0.28);
+      line-height: 1.8;
+    }
+
+    .hud-hotkeys kbd {
+      display: inline-block;
+      background: rgba(0, 255, 231, 0.10);
+      border: 1px solid rgba(0, 255, 231, 0.22);
+      border-radius: 2px;
+      padding: 0 4px;
+      font-family: var(--font);
+      font-size: 8px;
+      color: var(--cyan);
       letter-spacing: 0.05em;
     }
 
-    .hud-row span.val.crimson { color: var(--crimson); }
-    .hud-row span.val.blue    { color: var(--blue); }
+    /* ── Paused badge ───────────────────────────────────── */
+    #pause-badge {
+      position: fixed;
+      inset: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 25;
+      pointer-events: none;
+    }
+
+    #pause-badge.visible {
+      display: flex;
+    }
+
+    #pause-badge span {
+      font-family: var(--font);
+      font-size: 28px;
+      font-weight: bold;
+      letter-spacing: 0.4em;
+      color: var(--cyan);
+      text-shadow: 0 0 30px var(--cyan), 0 0 60px var(--cyan);
+      animation: pausePulse 1.5s ease-in-out infinite;
+    }
+
+    @keyframes pausePulse {
+      0%, 100% { opacity: 0.9; }
+      50%       { opacity: 0.3; }
+    }
 
     /* ── Engine badge ───────────────────────────────────── */
     #engine-badge {
       position: fixed;
-      bottom: 18px;
-      right: 22px;
+      bottom: 16px;
+      right: 20px;
       z-index: 20;
       font-family: var(--font);
-      font-size: 9px;
+      font-size: 8.5px;
       letter-spacing: 0.18em;
-      color: rgba(0, 255, 231, 0.22);
+      color: rgba(0, 255, 231, 0.18);
       pointer-events: none;
       text-transform: uppercase;
     }
@@ -154,8 +214,10 @@
 
   <!-- Floating HUD -->
   <div id="hud-overlay" role="status" aria-live="polite">
+
+    <!-- Panel 1: Engine Performance -->
     <div class="hud-panel">
-      <div class="hud-title">■ NovaPulse Engine</div>
+      <div class="hud-title">■ NovaPulse  ·  Phase 2</div>
       <div class="hud-row">
         <span>FPS</span>
         <span class="val" id="hud-fps">—</span>
@@ -169,6 +231,8 @@
         <span class="val" id="hud-entities">—</span>
       </div>
     </div>
+
+    <!-- Panel 2: Swarm -->
     <div class="hud-panel">
       <div class="hud-title">▸ Swarm Status</div>
       <div class="hud-row">
@@ -184,10 +248,52 @@
         <span class="val" id="hud-simtime">—</span>
       </div>
     </div>
+
+    <!-- Panel 3: Physics Diagnostics (Phase 2) -->
+    <div class="hud-panel">
+      <div class="hud-title">⬡ Physics Diagnostics</div>
+      <div class="hud-row">
+        <span>GRID CELLS</span>
+        <span class="val green" id="hud-grid-cells">—</span>
+      </div>
+      <div class="hud-row">
+        <span>BROADPHASE PAIRS</span>
+        <span class="val amber" id="hud-bp-pairs">—</span>
+      </div>
+      <div class="hud-row">
+        <span>NARROW HITS</span>
+        <span class="val crimson" id="hud-np-hits">—</span>
+      </div>
+      <div class="hud-row">
+        <span>SOLVE ms</span>
+        <span class="val" id="hud-solve-ms">—</span>
+      </div>
+      <div class="hud-sep"></div>
+      <div class="hud-row">
+        <span>PRUNED</span>
+        <span class="val green" id="hud-pruned">—</span>
+      </div>
+    </div>
+
+    <!-- Panel 4: Hotkeys -->
+    <div class="hud-panel">
+      <div class="hud-title">⌨ Controls</div>
+      <div class="hud-hotkeys">
+        <div><kbd>Space</kbd> &nbsp;Pause / Resume</div>
+        <div><kbd>B</kbd> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Toggle Wireframes</div>
+        <div><kbd>R</kbd> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Reset Simulation</div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Pause overlay -->
+  <div id="pause-badge" aria-label="Paused">
+    <span>⏸ PAUSED</span>
   </div>
 
   <!-- Engine watermark -->
-  <div id="engine-badge">NOVAPULSE v1.0 · Phase 1</div>
+  <div id="engine-badge">NOVAPULSE v2.0 · Phase 2 · Spatial Collision</div>
 
   <!-- Entrypoint (ES module) -->
   <script type="module" src="src/main.js"></script>

@@ -1,5 +1,19 @@
 # Changelog
 
+### [2026-09-27 08:12 IST] feat(engine): bootstrap NovaPulse core and ECS architecture
+
+#### Key Highlights
+- Initialized core engine architecture including ECS, EventBus, and game loop
+- Implemented high-performance 2D math utilities for memory-efficient simulation
+- Added Hi-DPI aware viewport management and canvas rendering
+- Deployed autonomous agent simulation entrypoint and comprehensive test suite
+
+#### Files Modified
+CHANGELOG.md, index.html, package.json, src/core/events.js, src/core/loop.js, src/core/math.js, src/core/viewport.js, src/ecs/components.js, src/ecs/entity.js, src/ecs/systems.js
+
+#### Functional & Architectural Impact
+This release establishes the foundational architecture for the NovaPulse engine. By implementing a bitmask-based Entity Component System (ECS) and a garbage-collection-friendly math library, the engine provides a robust framework for high-density autonomous agent simulations. The integration of a high-precision requestAnimationFrame loop and responsive viewport scaling ensures consistent performance and visual fidelity across various display environments, while the included test suite provides a stable baseline for future feature development.
+
 ### [2026-09-27 07:54 IST] feat(engine): initialize NovaPulse core and ECS architecture
 
 #### Key Highlights

@@ -1,9 +1,13 @@
 /**
  * @file main.js
- * @description NovaPulse Phase 1 entrypoint.
+ * @description NovaPulse Phase 2 entrypoint.
  *
- * Initializes all engine subsystems, spawns 60 autonomous dual-team agents,
- * wires the game loop, and drives the HUD readout.
+ * Changes from Phase 1:
+ *  - 150 physics-enabled entities (mix of circle + box colliders, varying mass)
+ *  - CollisionSystem integrated with SpatialHashGrid broadphase
+ *  - Hotkeys: [Space] pause/resume, [B] debug wireframe, [R] reset
+ *  - Extended HUD with physics diagnostics
+ *  - window.__NOVAPULSE__ updated to v2.0 debug API
  */
 
 import { Viewport }            from './core/viewport.js';
@@ -15,231 +19,346 @@ import {
   KinematicsComponent,
   RenderComponent,
   AgentStateComponent,
+  ColliderComponent,
+  RigidBodyComponent,
 }                              from './ecs/components.js';
 import {
   MovementSystem,
   BoundarySystem,
+  CollisionSystem,
   RenderSystem,
   WanderSystem,
 }                              from './ecs/systems.js';
-import { Vec2 }                from './core/math.js';
+import { CircleCollider, BoxCollider } from './physics/colliders.js';
 
 // ─────────────────────────────────────────────────────────────
 //  Constants
 // ─────────────────────────────────────────────────────────────
 
-const ENTITY_COUNT  = 60;
-const TRAIL_ALPHA   = 0.15;   // motion-blur trail opacity
+const ENTITY_COUNT = 150;
+const TRAIL_ALPHA  = 0.18;
+const CELL_SIZE    = 52;
 
 /** Neon palettes per team */
 const PALETTES = {
   blue: {
-    colors: ['#00cfff', '#00ffe7', '#5af5ff', '#00b8ff'],
+    colors: ['#00cfff', '#00ffe7', '#5af5ff', '#00b8ff', '#40e0ff'],
     shapes: ['triangle', 'circle'],
   },
   crimson: {
-    colors: ['#ff2d55', '#ff6b8a', '#ff0040', '#ff3f80'],
+    colors: ['#ff2d55', '#ff6b8a', '#ff0040', '#ff3f80', '#ff7040'],
     shapes: ['triangle', 'diamond'],
   },
 };
 
 // ─────────────────────────────────────────────────────────────
-//  HUD element references
+//  HUD references
 // ─────────────────────────────────────────────────────────────
 
-const $fps      = document.getElementById('hud-fps');
-const $tick     = document.getElementById('hud-tick');
-const $entities = document.getElementById('hud-entities');
-const $blue     = document.getElementById('hud-blue');
-const $crimson  = document.getElementById('hud-crimson');
-const $simtime  = document.getElementById('hud-simtime');
+const $fps        = document.getElementById('hud-fps');
+const $tick       = document.getElementById('hud-tick');
+const $entities   = document.getElementById('hud-entities');
+const $blue       = document.getElementById('hud-blue');
+const $crimson    = document.getElementById('hud-crimson');
+const $simtime    = document.getElementById('hud-simtime');
+const $gridCells  = document.getElementById('hud-grid-cells');
+const $bpPairs    = document.getElementById('hud-bp-pairs');
+const $npHits     = document.getElementById('hud-np-hits');
+const $solveMs    = document.getElementById('hud-solve-ms');
+const $pruned     = document.getElementById('hud-pruned');
+const $pauseBadge = document.getElementById('pause-badge');
 
 // ─────────────────────────────────────────────────────────────
 //  Bootstrap
 // ─────────────────────────────────────────────────────────────
 
+// Hold top-level references for reset
+let _loop, _world, _viewport, _bus;
+let _collisionSystem, _renderSystem, _boundarySystem;
+let _blueCount = 0, _crimsonCount = 0;
+let _isPaused  = false;
+let _debugMode = false;
+
 function init() {
 
   // ── 1. Core subsystems ────────────────────────────────────
-  const bus      = new EventBus();
-  const canvas   = document.getElementById('sim-canvas');
-  const viewport = new Viewport(canvas, bus);
-  const world    = new World();
+  _bus      = new EventBus();
+  const canvas = document.getElementById('sim-canvas');
+  _viewport = new Viewport(canvas, _bus);
+  _world    = new World();
 
-  // ── 2. Systems (order matters: physics before render) ─────
-  const boundarySystem = new BoundarySystem({ mode: 'wrap', margin: 24, viewport });
-  const wanderSystem   = new WanderSystem({ changeInterval: 1.2, forceScale: 90 });
+  // ── 2. Systems ────────────────────────────────────────────
+  _boundarySystem  = new BoundarySystem({ mode: 'bounce', margin: 18, viewport: _viewport });
+  const wanderSystem = new WanderSystem({ changeInterval: 1.4, forceScale: 95 });
   const movementSystem = new MovementSystem();
-  const renderSystem   = new RenderSystem();
+  _collisionSystem = new CollisionSystem({
+    bus:      _bus,
+    cellSize: CELL_SIZE,
+    velocityThreshold: 55,
+  });
+  _renderSystem = new RenderSystem({
+    debugWireframe: _debugMode,
+    grid:     _collisionSystem.grid,
+    viewport: _viewport,
+  });
 
-  world
+  _world
     .addSystem(wanderSystem)
     .addSystem(movementSystem)
-    .addSystem(boundarySystem)
-    .addSystem(renderSystem);
+    .addSystem(_boundarySystem)
+    .addSystem(_collisionSystem)
+    .addSystem(_renderSystem);
 
-  // ── 3. Entity spawning ────────────────────────────────────
-  const teams    = ['blue', 'crimson'];
-  let blueCount  = 0;
-  let crimsonCount = 0;
+  // ── 3. Spawn 150 physics entities ─────────────────────────
+  _blueCount    = 0;
+  _crimsonCount = 0;
+  spawnEntities(ENTITY_COUNT);
 
-  for (let i = 0; i < ENTITY_COUNT; i++) {
-    const team    = teams[i % 2];
-    const palette = PALETTES[team];
-    const color   = palette.colors[Math.floor(Math.random() * palette.colors.length)];
-    const shape   = palette.shapes[Math.floor(Math.random() * palette.shapes.length)];
+  // ── 4. Collision event listeners ─────────────────────────
+  _bus.on('collision:enter', ({ idA, idB }) => {
+    // Future: sound / particle bursts can hook here
+    void idA; void idB;
+  });
 
-    // Random position across viewport
-    const x = Math.random() * viewport.width;
-    const y = Math.random() * viewport.height;
+  // ── 5. HUD ────────────────────────────────────────────────
+  let _hudSkip = 0;
 
-    // Random initial speed
-    const speed    = 40 + Math.random() * 110;  // px/s
-    const heading  = Math.random() * Math.PI * 2;
-    const vx       = Math.cos(heading) * speed;
-    const vy       = Math.sin(heading) * speed;
+  function updateHUD() {
+    if (++_hudSkip % 4 !== 0) return;
+    const totalEntities = _world.entityCount;
+    const narrow = _collisionSystem.lastNarrowphaseHits;
+    const broad  = _collisionSystem.lastBroadphasePairs;
+    // Pruned = (N*(N-1)/2) - broadphase pairs tested
+    const N       = totalEntities;
+    const naivePairs = N * (N - 1) / 2;
+    const pruned  = Math.max(0, naivePairs - broad);
 
-    world.createEntity(entity => {
-      entity
-        .add(new TransformComponent(x, y, heading))
-        .add(new KinematicsComponent({
-          maxSpeed: 50 + Math.random() * 130,
-          maxForce: 160 + Math.random() * 80,
-          drag:     0.96 + Math.random() * 0.03,
-        }))
-        .add(new RenderComponent({
-          shape,
-          size:  5 + Math.random() * 5,
-          color,
-          glow:  team === 'blue' ? 14 : 10,
-        }))
-        .add(new AgentStateComponent({
-          mode:         'roam',
-          energy:       60 + Math.random() * 40,
-          team,
-        }));
-
-      // Set initial velocity
-      const kin = entity.get(KinematicsComponent);
-      kin.velocity.set(vx, vy);
-    });
-
-    if (team === 'blue') blueCount++;
-    else crimsonCount++;
+    $fps.textContent       = _loop.fps.toFixed(1);
+    $tick.textContent      = _loop.tickMs.toFixed(2);
+    $entities.textContent  = totalEntities;
+    $blue.textContent      = _blueCount;
+    $crimson.textContent   = _crimsonCount;
+    $simtime.textContent   = formatSimTime(_loop.simTime);
+    $gridCells.textContent = _collisionSystem.lastGridOccupancy;
+    $bpPairs.textContent   = broad;
+    $npHits.textContent    = narrow;
+    $solveMs.textContent   = _collisionSystem.lastSolveMsec.toFixed(2);
+    $pruned.textContent    = pruned.toLocaleString();
   }
 
-  // ── 4. HUD update (runs each render frame) ────────────────
-  let hudFrameSkip = 0;
-
-  function updateHUD(loop) {
-    // Only refresh DOM every 4 frames (~15 Hz) to avoid layout thrash
-    if (++hudFrameSkip % 4 !== 0) return;
-    $fps.textContent      = loop.fps.toFixed(1);
-    $tick.textContent     = loop.tickMs.toFixed(2);
-    $entities.textContent = world.entityCount;
-    $blue.textContent     = blueCount;
-    $crimson.textContent  = crimsonCount;
-    $simtime.textContent  = formatSimTime(loop.simTime);
-  }
-
-  // ── 5. Game loop callbacks ────────────────────────────────
-  const loop = new GameLoop({
-
+  // ── 6. Game loop ──────────────────────────────────────────
+  _loop = new GameLoop({
     fixedUpdate(dt) {
-      world.fixedUpdate(dt);
+      _world.fixedUpdate(dt);
     },
-
-    update(dt, alpha) {
-      updateHUD(loop);
+    update(_dt, _alpha) {
+      updateHUD();
     },
-
     render(alpha) {
-      // Motion-trail background
-      viewport.trail(TRAIL_ALPHA);
-
-      // ECS render pass
-      world.render(viewport.ctx, alpha);
+      _viewport.trail(TRAIL_ALPHA);
+      _world.render(_viewport.ctx, alpha);
     },
   });
 
-  // ── 6. Viewport resize — update boundary viewport ref ─────
-  bus.on('viewport:resize', () => {
-    boundarySystem.viewport = viewport;
+  // ── 7. Resize handling ────────────────────────────────────
+  _bus.on('viewport:resize', () => {
+    _boundarySystem.viewport = _viewport;
+    _renderSystem.viewport   = _viewport;
   });
 
-  // ── 7. Start ──────────────────────────────────────────────
-  loop.start();
-
-  // ── 8. Debug interface ────────────────────────────────────
-  window.__NOVAPULSE__ = {
-    version:  '1.0.0',
-    phase:    1,
-    loop,
-    viewport,
-    world,
-    bus,
-    /** Pause / resume the simulation */
-    toggle:   () => loop.isActive ? loop.pause() : loop.resume(),
-    /** Spawn additional agents at a given team */
-    spawn(team = 'blue', count = 1) {
-      const palette = PALETTES[team] ?? PALETTES.blue;
-      for (let i = 0; i < count; i++) {
-        world.createEntity(entity => {
-          const color   = palette.colors[Math.floor(Math.random() * palette.colors.length)];
-          const shape   = palette.shapes[Math.floor(Math.random() * palette.shapes.length)];
-          const heading = Math.random() * Math.PI * 2;
-          entity
-            .add(new TransformComponent(
-              Math.random() * viewport.width,
-              Math.random() * viewport.height,
-              heading
-            ))
-            .add(new KinematicsComponent({ maxSpeed: 80 + Math.random() * 120 }))
-            .add(new RenderComponent({ shape, color, size: 5 + Math.random() * 5, glow: 14 }))
-            .add(new AgentStateComponent({ mode: 'roam', team }));
-          const kin = entity.get(KinematicsComponent);
-          kin.velocity.set(Math.cos(heading) * 60, Math.sin(heading) * 60);
-        });
-        if (team === 'blue') blueCount++;
-        else crimsonCount++;
-      }
-    },
-    /** Expose debug snapshot */
-    debug: () => ({ ...world.debug(), fps: loop.fps, simTime: loop.simTime }),
-  };
+  // ── 8. Start ──────────────────────────────────────────────
+  _loop.start();
+  _isPaused = false;
 
   console.info(
-    '%c⚡ NovaPulse v1.0 Phase 1 initialized',
+    '%c⚡ NovaPulse v2.0 Phase 2 initialized',
     'color:#00ffe7;font-weight:bold;font-size:13px;',
     `\n  Entities: ${ENTITY_COUNT}`,
-    `\n  Blue: ${blueCount} | Crimson: ${crimsonCount}`,
+    `\n  Cell size: ${CELL_SIZE}px`,
+    `\n  Blue: ${_blueCount} | Crimson: ${_crimsonCount}`,
+    '\n  [Space] pause · [B] wireframe · [R] reset',
     '\n  Debug → window.__NOVAPULSE__'
   );
 }
 
 // ─────────────────────────────────────────────────────────────
+//  Entity spawning
+// ─────────────────────────────────────────────────────────────
+
+function spawnEntities(count) {
+  const teams = ['blue', 'crimson'];
+
+  for (let i = 0; i < count; i++) {
+    const team    = teams[i % 2];
+    const palette = PALETTES[team];
+    const color   = palette.colors[Math.floor(Math.random() * palette.colors.length)];
+    const shape   = palette.shapes[Math.floor(Math.random() * palette.shapes.length)];
+
+    const x       = 40 + Math.random() * (_viewport.width  - 80);
+    const y       = 40 + Math.random() * (_viewport.height - 80);
+    const speed   = 35 + Math.random() * 95;
+    const heading = Math.random() * Math.PI * 2;
+    const vx      = Math.cos(heading) * speed;
+    const vy      = Math.sin(heading) * speed;
+
+    // Vary entity type for visual diversity
+    const typeRoll  = Math.random();
+    const isBoxBody = typeRoll < 0.25;   // 25% boxes
+    const mass      = 0.5 + Math.random() * 3.5;
+    const visualSz  = 5 + Math.random() * 7;
+
+    // Collider geometry
+    let colliderShape;
+    if (isBoxBody) {
+      const hw = visualSz * 0.9;
+      const hh = visualSz * 0.65;
+      colliderShape = new BoxCollider({ halfWidth: hw, halfHeight: hh });
+    } else {
+      colliderShape = new CircleCollider({ radius: visualSz * 1.05 });
+    }
+
+    _world.createEntity(entity => {
+      entity
+        .add(new TransformComponent(x, y, heading))
+        .add(new KinematicsComponent({
+          maxSpeed: 45 + Math.random() * 125,
+          maxForce: 140 + Math.random() * 90,
+          drag:     0.97 + Math.random() * 0.02,
+        }))
+        .add(new RenderComponent({
+          shape:   isBoxBody ? 'diamond' : shape,
+          size:    visualSz,
+          color,
+          glow:    team === 'blue' ? 13 : 10,
+        }))
+        .add(new AgentStateComponent({
+          mode:   'roam',
+          energy: 60 + Math.random() * 40,
+          team,
+        }))
+        .add(new ColliderComponent({ shape: colliderShape }))
+        .add(new RigidBodyComponent({
+          mass,
+          restitution: 0.35 + Math.random() * 0.4,
+          friction:    0.15 + Math.random() * 0.25,
+        }));
+
+      const kin = entity.get(KinematicsComponent);
+      kin.velocity.set(vx, vy);
+    });
+
+    if (team === 'blue') _blueCount++;
+    else _crimsonCount++;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Hotkeys
+// ─────────────────────────────────────────────────────────────
+
+document.addEventListener('keydown', e => {
+  // Ignore when focused on an input
+  if (e.target !== document.body && e.target !== document.documentElement) return;
+
+  switch (e.code) {
+    // ── Space: pause / resume ─────────────────────────────
+    case 'Space': {
+      e.preventDefault();
+      if (_isPaused) {
+        _loop.resume();
+        _isPaused = false;
+        $pauseBadge.classList.remove('visible');
+      } else {
+        _loop.pause();
+        _isPaused = true;
+        $pauseBadge.classList.add('visible');
+      }
+      break;
+    }
+
+    // ── B: toggle debug wireframes ────────────────────────
+    case 'KeyB': {
+      _debugMode = !_debugMode;
+      _renderSystem.debugWireframe = _debugMode;
+      console.info(`[NovaPulse] Debug wireframe: ${_debugMode ? 'ON' : 'OFF'}`);
+      break;
+    }
+
+    // ── R: reset simulation ───────────────────────────────
+    case 'KeyR': {
+      _loop.stop();
+      _world = new World(); // discard all entities
+      _blueCount    = 0;
+      _crimsonCount = 0;
+      init();
+      break;
+    }
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
 //  Helpers
 // ─────────────────────────────────────────────────────────────
 
-/**
- * Format simulation time (seconds) as MM:SS.mmm
- * @param {number} t - seconds
- * @returns {string}
- */
 function formatSimTime(t) {
   const m  = Math.floor(t / 60);
   const s  = Math.floor(t % 60);
   const ms = Math.floor((t % 1) * 1000);
-  return `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}.${String(ms).padStart(3,'0')}`;
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(ms).padStart(3, '0')}`;
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Debug API
+// ─────────────────────────────────────────────────────────────
+
+// Set up debug interface after init (re-assigned on reset)
+function attachDebugAPI() {
+  window.__NOVAPULSE__ = {
+    version:  '2.0.0',
+    phase:    2,
+    get loop()             { return _loop; },
+    get viewport()         { return _viewport; },
+    get world()            { return _world; },
+    get bus()              { return _bus; },
+    get collisionSystem()  { return _collisionSystem; },
+    toggle:   () => _isPaused
+                      ? (_loop.resume(), _isPaused = false, $pauseBadge.classList.remove('visible'))
+                      : (_loop.pause(),  _isPaused = true,  $pauseBadge.classList.add('visible')),
+    wireframe: (on) => {
+      _debugMode = on ?? !_debugMode;
+      _renderSystem.debugWireframe = _debugMode;
+    },
+    spawn(team = 'blue', count = 5) {
+      spawnEntities(count);
+    },
+    physics: () => _collisionSystem ? {
+      broadphasePairs: _collisionSystem.lastBroadphasePairs,
+      narrowHits:      _collisionSystem.lastNarrowphaseHits,
+      solveMsec:       _collisionSystem.lastSolveMsec,
+      gridOccupancy:   _collisionSystem.lastGridOccupancy,
+      gridStats:       _collisionSystem.grid.stats(),
+    } : null,
+    debug: () => ({
+      ...(_world?.debug()),
+      fps:       _loop?.fps,
+      simTime:   _loop?.simTime,
+      blueCount: _blueCount,
+      crimsonCount: _crimsonCount,
+    }),
+  };
 }
 
 // ─────────────────────────────────────────────────────────────
 //  Run
 // ─────────────────────────────────────────────────────────────
 
-// Use DOMContentLoaded guard in case this module is loaded early
-if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', init);
-} else {
+function bootstrap() {
   init();
+  attachDebugAPI();
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', bootstrap);
+} else {
+  bootstrap();
 }

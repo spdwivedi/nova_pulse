@@ -1,16 +1,20 @@
 /**
  * @file components.js
- * @description Core ECS components for NovaPulse Phase 1.
+ * @description Core ECS components for NovaPulse (Phase 1 & 2).
  *
  * Components are plain data containers — no methods beyond a simple reset().
  * All numeric fields use typed-array-friendly primitives for future
  * struct-of-arrays migration.
  *
  * Components:
+ *  Phase 1:
  *  - TransformComponent   — position, rotation, scale
  *  - KinematicsComponent  — velocity, acceleration, speed limits, drag
  *  - RenderComponent      — visual representation descriptor
  *  - AgentStateComponent  — autonomous agent FSM state and metadata
+ *  Phase 2:
+ *  - ColliderComponent    — shape type, isTrigger, collision layer/mask
+ *  - RigidBodyComponent   — mass, restitution, friction, isStatic flag
  */
 
 import { Vec2 } from '../core/math.js';
@@ -174,5 +178,81 @@ export class AgentStateComponent {
      * @type {Vec2 | null}
      */
     this.seekTarget = null;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+//  ColliderComponent  (Phase 2)
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * Attaches a physics collider shape to an entity.
+ * The actual shape object (CircleCollider or BoxCollider) is stored
+ * in `.shape` and carries its own geometry.
+ *
+ * Collision filtering uses a layer / mask bitmask pattern:
+ *   entity A collides with entity B  if  (A.layer & B.mask) && (B.layer & A.mask)
+ *
+ * @typedef {'circle' | 'box'} ColliderType
+ */
+export class ColliderComponent {
+  /**
+   * @param {object} [opts]
+   * @param {import('../physics/colliders.js').CircleCollider |
+   *          import('../physics/colliders.js').BoxCollider} opts.shape - Collider primitive instance
+   * @param {boolean} [opts.isTrigger=false] - If true, detects overlap but skips physics response
+   * @param {number}  [opts.layer=0x01]      - This entity's collision layer bit(s)
+   * @param {number}  [opts.mask=0xFF]       - Layers this entity collides against
+   */
+  constructor({ shape, isTrigger = false, layer = 0x01, mask = 0xFF } = {}) {
+    if (!shape) throw new Error('ColliderComponent requires a shape (CircleCollider or BoxCollider)');
+
+    /** @type {import('../physics/colliders.js').CircleCollider | import('../physics/colliders.js').BoxCollider} */
+    this.shape     = shape;
+    this.isTrigger = isTrigger;
+
+    /** Collision layer bitmask for this entity */
+    this.layer = layer;
+
+    /** Bitmask of layers this entity tests against */
+    this.mask = mask;
+
+    /**
+     * Set of entity IDs currently overlapping this entity.
+     * Used to distinguish collision:enter from collision:stay.
+     * @type {Set<number>}
+     */
+    this.activeContacts = new Set();
+
+    /**
+     * Visual flash timer (seconds). Set on high-energy collision;
+     * decays to 0 over time for glow-burst rendering.
+     */
+    this.flashTimer = 0;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+//  RigidBodyComponent  (Phase 2)
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * Physics rigid-body properties used by the CollisionResolver.
+ * Entities without this component can still have colliders (trigger-only).
+ */
+export class RigidBodyComponent {
+  /**
+   * @param {object} [opts]
+   * @param {number}  [opts.mass=1]          - Mass in arbitrary units (0 = infinite / static)
+   * @param {number}  [opts.restitution=0.45] - Bounciness coefficient [0=inelastic, 1=perfectly elastic]
+   * @param {number}  [opts.friction=0.25]   - Coulomb friction coefficient [0=frictionless]
+   * @param {boolean} [opts.isStatic=false]  - Static bodies are immovable (invMass = 0)
+   */
+  constructor({ mass = 1, restitution = 0.45, friction = 0.25, isStatic = false } = {}) {
+    this.isStatic    = isStatic;
+    this.mass        = isStatic ? Infinity : mass;
+    this.invMass     = isStatic ? 0 : (mass > 0 ? 1 / mass : 0);
+    this.restitution = restitution;
+    this.friction    = friction;
   }
 }
