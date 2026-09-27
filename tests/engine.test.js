@@ -1,6 +1,6 @@
 /**
  * @file engine.test.js
- * @description Automated unit tests for NovaPulse (Phase 1, 2, & 3).
+ * @description Automated unit tests for NovaPulse (Phase 1, 2, 3, & 4).
  *
  * Run via:  npm test  (node tests/engine.test.js)
  *
@@ -21,6 +21,10 @@
  *  11. Swarm Behaviors — blue flocking & crimson hunter AI
  *  12. Spatial Hash Neighbor Radius Perception
  *  13. Phase 3 Components & Player Controller Integration
+ *  14. ProjectilePool — pre-allocation, lifecycle, wrap-around recycling
+ *  15. ParticlePool — pre-allocation, decay lifecycle, preset emitters
+ *  16. CombatSystem & Weapons — damage application, entity death, and weapons
+ *  17. Phase 4 Components & SoundSynth — WeaponComponent, AudioSourceComponent, SoundSynth
  */
 
 import assert from 'node:assert/strict';
@@ -1326,6 +1330,261 @@ test('PlayerInputSystem integrates thrust and rotates toward cursor in manual mo
 });
 
 // ─────────────────────────────────────────────────────────────
+//  Suite 14: ProjectilePool (Phase 4)
+// ─────────────────────────────────────────────────────────────
+
+import { ProjectilePool } from '../src/combat/projectile_pool.js';
+
+suite('ProjectilePool — Allocation & Lifecycle');
+
+test('pre-allocates exactly 400 projectile slots', () => {
+  const pool = new ProjectilePool(400);
+  assert.equal(pool.maxCapacity, 400);
+  assert.equal(pool.pool.length, 400);
+  assert.equal(pool.activeCount, 0);
+});
+
+test('spawn activates projectile with specified coordinates and velocity', () => {
+  const pool = new ProjectilePool(400);
+  const p = pool.spawn(100, 200, 300, -150, 'blue', 25, 1.2, '#00ffe7', 3.5);
+  assert.equal(p.active, true);
+  assert.equal(p.x, 100);
+  assert.equal(p.y, 200);
+  assert.equal(p.vx, 300);
+  assert.equal(p.vy, -150);
+  assert.equal(p.damage, 25);
+  assert.equal(p.team, 'blue');
+  assert.equal(pool.activeCount, 1);
+});
+
+test('update advances position and expires projectile when ttl reaches zero', () => {
+  const pool = new ProjectilePool(400);
+  const p = pool.spawn(0, 0, 100, 50, 'blue', 20, 0.1);
+
+  pool.update(0.05);
+  approxLoose(p.x, 5);
+  approxLoose(p.y, 2.5);
+  assert.equal(p.active, true);
+
+  pool.update(0.06); // ttl <= 0
+  assert.equal(p.active, false);
+  assert.equal(pool.activeCount, 0);
+});
+
+test('recycle deactivates projectile immediately', () => {
+  const pool = new ProjectilePool(400);
+  const p = pool.spawn(0, 0, 10, 10);
+  assert.equal(pool.activeCount, 1);
+  pool.recycle(p);
+  assert.equal(p.active, false);
+  assert.equal(pool.activeCount, 0);
+});
+
+test('pool exhaustion wraps around and recycles without memory growth', () => {
+  const pool = new ProjectilePool(400);
+
+  // Spawn all 400 slots
+  for (let i = 0; i < 400; i++) {
+    pool.spawn(i, i, 10, 10, 'blue', 10, 10);
+  }
+  assert.equal(pool.activeCount, 400);
+  assert.equal(pool.pool.length, 400);
+
+  // Spawn 100 additional projectiles beyond capacity
+  for (let i = 0; i < 100; i++) {
+    pool.spawn(999, 999, 20, 20, 'blue', 15, 5);
+  }
+
+  // Memory length must remain strictly 400
+  assert.equal(pool.pool.length, 400);
+  assert.equal(pool.activeCount, 400);
+  assert.equal(pool.totalSpawned, 500);
+});
+
+// ─────────────────────────────────────────────────────────────
+//  Suite 15: ParticlePool (Phase 4)
+// ─────────────────────────────────────────────────────────────
+
+import { ParticlePool } from '../src/fx/particle_pool.js';
+
+suite('ParticlePool — Additive FX Engine');
+
+test('pre-allocates exactly 800 particle slots', () => {
+  const fx = new ParticlePool(800);
+  assert.equal(fx.maxCapacity, 800);
+  assert.equal(fx.pool.length, 800);
+  assert.equal(fx.activeCount, 0);
+});
+
+test('particle lifecycle updates position, alpha, and size decay', () => {
+  const fx = new ParticlePool(800);
+  const p = fx.spawn(50, 50, 100, 0, 4, '#ff2d55', 0.2, 1.0, 0.9);
+
+  fx.update(0.1);
+  assert.ok(p.x > 50, 'Position should advance');
+  assert.ok(p.alpha < 1.0, 'Alpha should fade out');
+  assert.ok(p.size < 4, 'Size should decay');
+  assert.equal(p.active, true);
+
+  fx.update(0.15); // Exceeds maxLife (0.2)
+  assert.equal(p.active, false);
+  assert.equal(fx.activeCount, 0);
+});
+
+test('emitters burst multiple particles into the pool', () => {
+  const fx = new ParticlePool(800);
+
+  fx.emitMuzzleFlash(0, 0, 0, '#00ffe7');
+  const countMuzzle = fx.activeCount;
+  assert.ok(countMuzzle > 0, 'Muzzle flash should spawn particles');
+
+  fx.emitImpactSparks(10, 10, { x: 1, y: 0 }, 8, '#ffee00');
+  assert.ok(fx.activeCount > countMuzzle, 'Impact sparks should add particles');
+
+  fx.emitExplosion(100, 100, 16, '#ff2d55');
+  assert.ok(fx.activeCount >= countMuzzle + 8 + 16, 'Explosion should add blast ring & debris');
+
+  fx.clear();
+  assert.equal(fx.activeCount, 0);
+});
+
+// ─────────────────────────────────────────────────────────────
+//  Suite 16: CombatSystem & Weapons (Phase 4)
+// ─────────────────────────────────────────────────────────────
+
+import { firePlayerCannon, fireHunterSpore } from '../src/combat/weapons.js';
+import { CombatSystem } from '../src/ecs/systems.js';
+
+suite('CombatSystem & Weapons');
+
+test('firePlayerCannon spawns dual plasma bolts and initiates cooldown', () => {
+  const pool = new ProjectilePool(400);
+  const tf = { position: new Vec2(100, 100), rotation: 0, scale: 1 };
+  const weapon = new WeaponComponent({ fireRate: 10, damage: 25 });
+  const target = new Vec2(200, 100);
+
+  const fired = firePlayerCannon(tf, weapon, target, pool);
+  assert.equal(fired, true);
+  assert.equal(pool.activeCount, 2, 'Should spawn dual plasma bolts');
+  assert.ok(weapon.cooldown > 0, 'Weapon should be on cooldown');
+
+  // Second immediate shot should be blocked by cooldown
+  const firedAgain = firePlayerCannon(tf, weapon, target, pool);
+  assert.equal(firedAgain, false);
+});
+
+test('CombatSystem detects projectile hit, applies damage, and destroys target on lethal hit', () => {
+  const pool = new ProjectilePool(400);
+  const fx = new ParticlePool(800);
+  const combatSystem = new CombatSystem({ projectilePool: pool, particlePool: fx });
+
+  // Spawn blue projectile heading towards target at (100, 100)
+  pool.spawn(95, 100, 100, 0, 'blue', 50, 1.0);
+
+  // Target entity with 40 HP (Crimson Hunter)
+  const targetTf = { position: new Vec2(100, 100), scale: 1 };
+  const targetKin = { velocity: new Vec2(0, 0) };
+  const targetBoid = new BoidComponent({ flockType: 'crimson' });
+  const targetCombat = new CombatStateComponent({ health: 40, maxHealth: 40 });
+  const targetCollider = new CircleCollider({ radius: 8 });
+
+  let entityDestroyedCalled = false;
+  const mockWorld = {
+    destroyEntity(e) {
+      entityDestroyedCalled = true;
+      e.destroyed = true;
+    },
+  };
+
+  const mockEntity = {
+    id: 1,
+    destroyed: false,
+    get(cls) {
+      if (cls === TransformComponent) return targetTf;
+      if (cls === KinematicsComponent) return targetKin;
+      if (cls === BoidComponent) return targetBoid;
+      if (cls === CombatStateComponent) return targetCombat;
+      if (cls === ColliderComponent) return { shape: targetCollider, flashTimer: 0 };
+      return null;
+    },
+  };
+
+  // Run combat system tick
+  combatSystem.fixedUpdate([mockEntity], 1 / 60, mockWorld);
+
+  assert.equal(targetCombat.health, 0, 'Damage should reduce health to 0');
+  assert.equal(entityDestroyedCalled, true, 'Target should be destroyed on lethal hit');
+  assert.equal(combatSystem.enemiesDestroyed, 1, 'Destroyed counter should increment');
+  assert.equal(pool.activeCount, 0, 'Projectile should be recycled on impact');
+});
+
+// ─────────────────────────────────────────────────────────────
+//  Suite 17: Phase 4 Components & SoundSynth (Phase 4)
+// ─────────────────────────────────────────────────────────────
+
+import { WeaponComponent, AudioSourceComponent } from '../src/ecs/components.js';
+import { SoundSynth } from '../src/audio/sound_synth.js';
+
+suite('Phase 4 Components & Audio');
+
+test('WeaponComponent cooldown, heat buildup, and cooling dissipation', () => {
+  const weapon = new WeaponComponent({
+    fireRate: 5,
+    maxHeat: 100,
+    heatPerShot: 20,
+    coolingRate: 40,
+  });
+
+  weapon.cooldown = 0.2;
+  weapon.heat = 60;
+  weapon.update(0.1);
+
+  approxLoose(weapon.cooldown, 0.1);
+  approxLoose(weapon.heat, 56); // 60 - 40 * 0.1 = 56
+});
+
+test('WeaponComponent overheat lock and cooling recovery', () => {
+  const weapon = new WeaponComponent({ maxHeat: 100, coolingRate: 100 });
+  weapon.heat = 100;
+  weapon.isOverheated = true;
+
+  weapon.update(0.5); // Cools by 50 -> heat = 50 (still > 25)
+  assert.equal(weapon.isOverheated, true);
+
+  weapon.update(0.3); // Cools by 30 -> heat = 20 (<= 25% threshold)
+  assert.equal(weapon.isOverheated, false, 'Overheat lock should clear once cooled');
+});
+
+test('AudioSourceComponent enqueue and flush', () => {
+  const audio = new AudioSourceComponent();
+  audio.enqueue('laser', 880, 220);
+  audio.enqueue('impact');
+
+  assert.equal(audio.soundQueue.length, 2);
+  const queue = audio.flush();
+  assert.equal(queue.length, 2);
+  assert.equal(audio.soundQueue.length, 0);
+  assert.equal(queue[0].soundName, 'laser');
+});
+
+test('SoundSynth initializes safely without error and toggles mute', () => {
+  const synth = new SoundSynth();
+  assert.equal(synth.isMuted, false);
+
+  const muted = synth.toggleMute();
+  assert.equal(muted, true);
+  assert.equal(synth.isMuted, true);
+
+  // Calling methods should never throw even without AudioContext
+  assert.doesNotThrow(() => {
+    synth.playLaser();
+    synth.playImpact();
+    synth.playExplosion();
+    synth.playThruster(true, 0.8);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
 //  Summary
 // ─────────────────────────────────────────────────────────────
 
@@ -1342,4 +1601,5 @@ if (failCount > 0) {
 } else {
   console.log(`${GREEN}${BOLD}All tests passed! ✓${RESET}\n`);
 }
+
 

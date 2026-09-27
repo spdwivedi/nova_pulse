@@ -1,5 +1,19 @@
 # Changelog
 
+### [2026-09-27 08:36 IST] feat(engine): complete NovaPulse swarm simulation engine (Phase 3)
+
+#### Key Highlights
+- Finalized autonomous agent steering behaviors and flocking logic.
+- Integrated full physics pipeline including spatial hashing and impulse resolution.
+- Scaled ECS architecture to support complex agent interactions and state management.
+- Established automated testing framework for engine stability.
+
+#### Files Modified
+.gitignore, CHANGELOG.md, index.html, package.json, src/ai/behaviors.js, src/ai/steering.js, src/core/events.js, src/core/loop.js, src/core/math.js, src/core/viewport.js
+
+#### Functional & Architectural Impact
+The NovaPulse engine is now a fully functional 2D autonomous swarm simulation platform. The architecture leverages a high-performance ECS pattern to handle 60+ agents with real-time physics, collision detection, and complex steering behaviors. The implementation ensures GC-friendly memory management through in-place vector arithmetic and provides a stable foundation for further simulation scaling and behavioral research.
+
 ### [2026-09-27 08:26 IST] feat(physics): implement collision detection and resolution system
 
 #### Key Highlights

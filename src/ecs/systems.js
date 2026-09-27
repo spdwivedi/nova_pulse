@@ -1,15 +1,16 @@
 /**
  * @file systems.js
- * @description ECS systems for NovaPulse (Phase 1, 2, & 3).
+ * @description ECS systems for NovaPulse (Phase 1, 2, 3, & 4).
  *
  * Systems:
  *  1. MovementSystem       — integrates kinematics (velocity + acceleration + drag)
  *  2. BoundarySystem       — wraps or bounces entities at viewport edges
  *  3. CollisionSystem      — spatial hash broadphase + narrow-phase + impulse resolution
  *  4. BoidSystem           — Craig Reynolds autonomous flocking & predator-prey dynamics
- *  5. PlayerInputSystem    — manual flight controller & mouse-aim targeting
- *  6. RenderSystem         — canvas drawing with glow, distinct ship sprites, & crosshair
- *  7. WanderSystem         — stochastic autonomous roam behaviour
+ *  5. PlayerInputSystem    — manual flight controller, weapon trigger, & mouse targeting
+ *  6. CombatSystem         — projectile collision detection, damage application, death FX
+ *  7. RenderSystem         — canvas drawing with additive particle FX, laser bolts, & sprites
+ *  8. WanderSystem         — stochastic autonomous roam behaviour
  */
 
 import {
@@ -22,12 +23,15 @@ import {
   BoidComponent,
   PlayerControllerComponent,
   CombatStateComponent,
+  WeaponComponent,
+  AudioSourceComponent,
 } from './components.js';
 import { Vec2, lerp, wrapAngle, clamp } from '../core/math.js';
 import { SpatialHashGrid }       from '../physics/spatial_hash.js';
 import { testCollision }         from '../physics/narrowphase.js';
 import { CollisionResolver }     from '../physics/resolver.js';
 import { computeBlueFlockSteering, computeCrimsonHunterSteering } from '../ai/behaviors.js';
+import { firePlayerCannon, fireHunterSpore } from '../combat/weapons.js';
 
 // ─────────────────────────────────────────────────────────────
 //  MovementSystem
@@ -162,7 +166,7 @@ export class BoundarySystem {
 }
 
 // ─────────────────────────────────────────────────────────────
-//  CollisionSystem  (Phase 2 & 3)
+//  CollisionSystem  (Phase 2, 3, & 4)
 // ─────────────────────────────────────────────────────────────
 
 /**
@@ -289,12 +293,11 @@ export class CollisionSystem {
 }
 
 // ─────────────────────────────────────────────────────────────
-//  BoidSystem  (Phase 3)
+//  BoidSystem  (Phase 3 & 4)
 // ─────────────────────────────────────────────────────────────
 
 /**
  * Autonomous Craig Reynolds boid flocking and predator-prey dynamics.
- * Uses a dedicated SpatialHashGrid to accelerate neighbor perception.
  */
 export class BoidSystem {
   /**
@@ -310,16 +313,11 @@ export class BoidSystem {
     return [TransformComponent, KinematicsComponent, BoidComponent];
   }
 
-  /**
-   * @param {import('./entity.js').Entity[]} entities
-   * @param {number}                         dt
-   * @param {import('./world.js').World}      world
-   */
   fixedUpdate(entities, dt, world) {
     const grid = this._grid;
     grid.clear();
 
-    // 1. Insert boid positions into spatial grid for radius queries
+    // 1. Insert boid positions into spatial grid
     for (let i = 0; i < entities.length; i++) {
       const e = entities[i];
       const tf = e.get(TransformComponent);
@@ -335,7 +333,6 @@ export class BoidSystem {
     for (let i = 0; i < entities.length; i++) {
       const entity = entities[i];
 
-      // If player is in manual flight mode, skip AI steering
       const playerCtrl = entity.get(PlayerControllerComponent);
       if (playerCtrl && playerCtrl.isManualControlled) {
         continue;
@@ -345,7 +342,6 @@ export class BoidSystem {
       const kin  = entity.get(KinematicsComponent);
       const boid = entity.get(BoidComponent);
 
-      // Query neighbors within boid's perception radius
       const neighborIds = grid.queryRadius(tf.position, boid.perceptionRadius);
       const flockmates  = [];
       const enemies     = [];
@@ -407,41 +403,51 @@ export class BoidSystem {
 }
 
 // ─────────────────────────────────────────────────────────────
-//  PlayerInputSystem  (Phase 3)
+//  PlayerInputSystem  (Phase 3 & 4)
 // ─────────────────────────────────────────────────────────────
 
 /**
- * Handles keyboard flight controls (WASD / Arrows) and cursor targeting.
- * Toggles between [AUTO SWARM] and [MANUAL PILOT] with KeyM.
+ * Handles keyboard flight controls, continuous weapon trigger (Mouse/Space),
+ * and audio effects.
  */
 export class PlayerInputSystem {
   /**
    * @param {object} [opts]
    * @param {import('../core/viewport.js').Viewport} [opts.viewport]
    * @param {import('../core/events.js').EventBus} [opts.bus]
+   * @param {import('../fx/particle_pool.js').ParticlePool} [opts.particlePool]
+   * @param {import('../audio/sound_synth.js').SoundSynth} [opts.soundSynth]
    */
-  constructor({ viewport = null, bus = null } = {}) {
-    this.viewport = viewport;
-    this.bus      = bus;
+  constructor({ viewport = null, bus = null, particlePool = null, soundSynth = null } = {}) {
+    this.viewport     = viewport;
+    this.bus          = bus;
+    this.particlePool = particlePool;
+    this.soundSynth   = soundSynth;
 
     this.keys = {
       forward:  false,
       backward: false,
       left:     false,
       right:    false,
+      fire:     false,
     };
 
+    this.isPointerDown = false;
     this.mouseCanvasPos = new Vec2(0, 0);
     this._thrust = new Vec2();
 
-    this._onKeyDown   = this._handleKeyDown.bind(this);
-    this._onKeyUp     = this._handleKeyUp.bind(this);
-    this._onMouseMove = this._handleMouseMove.bind(this);
+    this._onKeyDown     = this._handleKeyDown.bind(this);
+    this._onKeyUp       = this._handleKeyUp.bind(this);
+    this._onMouseMove   = this._handleMouseMove.bind(this);
+    this._onPointerDown = this._handlePointerDown.bind(this);
+    this._onPointerUp   = this._handlePointerUp.bind(this);
 
     if (typeof window !== 'undefined') {
-      window.addEventListener('keydown', this._onKeyDown);
-      window.addEventListener('keyup', this._onKeyUp);
-      window.addEventListener('mousemove', this._onMouseMove);
+      window.addEventListener('keydown',     this._onKeyDown);
+      window.addEventListener('keyup',       this._onKeyUp);
+      window.addEventListener('mousemove',   this._onMouseMove);
+      window.addEventListener('pointerdown', this._onPointerDown);
+      window.addEventListener('pointerup',   this._onPointerUp);
     }
   }
 
@@ -457,8 +463,19 @@ export class PlayerInputSystem {
     if (e.code === 'KeyA' || e.code === 'ArrowLeft')  this.keys.left     = true;
     if (e.code === 'KeyD' || e.code === 'ArrowRight') this.keys.right    = true;
 
+    if (e.code === 'Space') {
+      this.keys.fire = true;
+    }
+
     if (e.code === 'KeyM') {
       this.toggleMode();
+    }
+
+    if (e.code === 'KeyX') {
+      if (this.soundSynth) {
+        const isMuted = this.soundSynth.toggleMute();
+        if (this.bus) this.bus.emit('sound:muteToggle', isMuted);
+      }
     }
   }
 
@@ -467,6 +484,7 @@ export class PlayerInputSystem {
     if (e.code === 'KeyS' || e.code === 'ArrowDown')  this.keys.backward = false;
     if (e.code === 'KeyA' || e.code === 'ArrowLeft')  this.keys.left     = false;
     if (e.code === 'KeyD' || e.code === 'ArrowRight') this.keys.right    = false;
+    if (e.code === 'Space')                           this.keys.fire     = false;
   }
 
   _handleMouseMove(e) {
@@ -478,16 +496,24 @@ export class PlayerInputSystem {
     }
   }
 
-  toggleMode(entities = null) {
+  _handlePointerDown(e) {
+    if (e.button === 0) {
+      this.isPointerDown = true;
+    }
+  }
+
+  _handlePointerUp(e) {
+    if (e.button === 0) {
+      this.isPointerDown = false;
+    }
+  }
+
+  toggleMode() {
     if (this.bus) {
       this.bus.emit('player:modeToggle');
     }
   }
 
-  /**
-   * @param {import('./entity.js').Entity[]} entities
-   * @param {number}                         dt
-   */
   fixedUpdate(entities, dt) {
     for (let i = 0; i < entities.length; i++) {
       const entity = entities[i];
@@ -501,8 +527,12 @@ export class PlayerInputSystem {
       ctrl.strafeLeft     = this.keys.left;
       ctrl.strafeRight    = this.keys.right;
 
+      // Continuous firing trigger in manual mode
+      ctrl.firingPrimary = (this.isPointerDown || this.keys.fire) && ctrl.isManualControlled;
+
       if (!ctrl.isManualControlled) {
         ctrl.thrusterActive = Math.max(0, ctrl.thrusterActive - dt * 2.5);
+        if (this.soundSynth) this.soundSynth.playThruster(false);
         continue;
       }
 
@@ -547,31 +577,217 @@ export class PlayerInputSystem {
       if (isThrusting) {
         ctrl.thrusterActive = Math.min(1, ctrl.thrusterActive + dt * 6);
         kin.applyForce(this._thrust);
+
+        // Emit physical thruster sparks
+        if (this.particlePool && Math.random() < 0.75) {
+          const rearOffset = 12 * tf.scale;
+          const rx = tf.position.x - fwdX * rearOffset;
+          const ry = tf.position.y - fwdY * rearOffset;
+          this.particlePool.emitThrusterSparks(rx, ry, tf.rotation);
+        }
       } else {
         ctrl.thrusterActive = Math.max(0, ctrl.thrusterActive - dt * 3.5);
+      }
+
+      // Thruster continuous audio modulation
+      if (this.soundSynth) {
+        this.soundSynth.playThruster(isThrusting, ctrl.thrusterActive);
       }
     }
   }
 
   destroy() {
     if (typeof window !== 'undefined') {
-      window.removeEventListener('keydown', this._onKeyDown);
-      window.removeEventListener('keyup', this._onKeyUp);
-      window.removeEventListener('mousemove', this._onMouseMove);
+      window.removeEventListener('keydown',     this._onKeyDown);
+      window.removeEventListener('keyup',       this._onKeyUp);
+      window.removeEventListener('mousemove',   this._onMouseMove);
+      window.removeEventListener('pointerdown', this._onPointerDown);
+      window.removeEventListener('pointerup',   this._onPointerUp);
     }
   }
 }
 
 // ─────────────────────────────────────────────────────────────
-//  RenderSystem  (Phase 3 — with custom ship sprites & crosshair)
+//  CombatSystem  (Phase 4)
 // ─────────────────────────────────────────────────────────────
 
-const _FLASH_COLOR_BLUE    = '#ffffff';
-const _FLASH_COLOR_CRIMSON = '#ffee00';
-const _DEBUG_GRID_STYLE    = 'rgba(0, 255, 231, 0.08)';
-const _DEBUG_COLLIDER_OK   = 'rgba(0, 255, 100, 0.55)';
-const _DEBUG_COLLIDER_HIT  = 'rgba(255, 50, 50, 0.90)';
-const _CROSSHAIR_AMBER     = 'rgba(255, 196, 0, 0.85)';
+/**
+ * Handles weapon firing, projectile movement, damage application,
+ * particle explosions, and audio triggers.
+ */
+export class CombatSystem {
+  /**
+   * @param {object} [opts]
+   * @param {import('../combat/projectile_pool.js').ProjectilePool} opts.projectilePool
+   * @param {import('../fx/particle_pool.js').ParticlePool} opts.particlePool
+   * @param {import('../audio/sound_synth.js').SoundSynth} [opts.soundSynth]
+   * @param {import('../core/events.js').EventBus} [opts.bus]
+   */
+  constructor({ projectilePool, particlePool, soundSynth = null, bus = null } = {}) {
+    this.projectilePool   = projectilePool;
+    this.particlePool     = particlePool;
+    this.soundSynth       = soundSynth;
+    this.bus              = bus;
+
+    this.enemiesDestroyed = 0;
+  }
+
+  get componentTypes() {
+    return [TransformComponent, CombatStateComponent];
+  }
+
+  fixedUpdate(entities, dt, world) {
+    if (!this.projectilePool) return;
+
+    // 1. Advance projectile physics & lifetime
+    this.projectilePool.update(dt);
+
+    // 2. Advance particle decay
+    if (this.particlePool) {
+      this.particlePool.update(dt);
+    }
+
+    // 3. Process entities with WeaponComponent (Player + Hunters)
+    for (let i = 0; i < entities.length; i++) {
+      const entity = entities[i];
+      const weapon = entity.get(WeaponComponent);
+      if (!weapon) continue;
+
+      weapon.update(dt);
+
+      const tf = entity.get(TransformComponent);
+      const playerCtrl = entity.get(PlayerControllerComponent);
+
+      // Player Weapon
+      if (playerCtrl) {
+        if (playerCtrl.firingPrimary) {
+          firePlayerCannon(
+            tf,
+            weapon,
+            playerCtrl.cursorPosition,
+            this.projectilePool,
+            this.particlePool,
+            this.soundSynth
+          );
+        }
+      } else {
+        // Hunter / Crimson Drone Spore Emitter
+        const boid = entity.get(BoidComponent);
+        if (boid && boid.flockType === 'crimson') {
+          // Occasionally fire when hunting
+          if (Math.random() < 0.015 && weapon.cooldown <= 0) {
+            fireHunterSpore(
+              tf,
+              weapon,
+              null,
+              this.projectilePool,
+              this.particlePool,
+              this.soundSynth
+            );
+          }
+        }
+      }
+    }
+
+    // 4. Projectile-to-agent collision resolution
+    this.projectilePool.forEachActive(p => {
+      for (let i = 0; i < entities.length; i++) {
+        const entity = entities[i];
+        if (entity.destroyed) continue;
+
+        const boid = entity.get(BoidComponent);
+        const entityTeam = boid ? boid.flockType : (entity.get(AgentStateComponent)?.team || 'blue');
+
+        // Opposing team check only
+        if (entityTeam === p.team) continue;
+
+        const tf = entity.get(TransformComponent);
+        if (!tf) continue;
+
+        const col = entity.get(ColliderComponent);
+        const radius = col ? col.shape.radius * tf.scale : 8 * tf.scale;
+        const hitDist = radius + p.radius;
+
+        const dx = p.x - tf.position.x;
+        const dy = p.y - tf.position.y;
+        const distSq = dx * dx + dy * dy;
+
+        if (distSq <= hitDist * hitDist) {
+          // Direct impact hit!
+          const combat = entity.get(CombatStateComponent);
+          const kin = entity.get(KinematicsComponent);
+          const rc = entity.get(RenderComponent);
+
+          // Impact sparks & audio
+          if (this.particlePool) {
+            const hitNormal = {
+              x: dx / (Math.sqrt(distSq) || 1),
+              y: dy / (Math.sqrt(distSq) || 1),
+            };
+            this.particlePool.emitImpactSparks(p.x, p.y, hitNormal, 10, p.color);
+          }
+
+          if (this.soundSynth) {
+            this.soundSynth.playImpact(0.08);
+          }
+
+          // Kinetic knockback impulse
+          if (kin) {
+            const impulseMag = 40;
+            const spd = Math.sqrt(p.vx * p.vx + p.vy * p.vy) || 1;
+            kin.velocity.x += (p.vx / spd) * impulseMag;
+            kin.velocity.y += (p.vy / spd) * impulseMag;
+          }
+
+          // Hit visual flash
+          if (col) col.flashTimer = 0.16;
+
+          // Recycle projectile immediately
+          p.active = false;
+
+          // Apply damage & check destruction
+          if (combat) {
+            const isKilled = combat.takeDamage(p.damage);
+            if (isKilled) {
+              this.enemiesDestroyed++;
+
+              // Radial blast explosion FX
+              if (this.particlePool) {
+                this.particlePool.emitExplosion(
+                  tf.position.x,
+                  tf.position.y,
+                  entityTeam === 'crimson' ? 36 : 24,
+                  rc ? rc.color : (entityTeam === 'crimson' ? '#ff2d55' : '#00ffe7')
+                );
+              }
+
+              if (this.soundSynth) {
+                this.soundSynth.playExplosion(0.48);
+              }
+
+              if (this.bus) {
+                this.bus.emit('entity:destroyed', { entity, killerTeam: p.team });
+              }
+
+              world.destroyEntity(entity);
+            }
+          }
+
+          break; // Projectile spent
+        }
+      }
+    });
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+//  RenderSystem  (Phase 4 — with Additive Particles & Lasers)
+// ─────────────────────────────────────────────────────────────
+
+const _DEBUG_GRID_STYLE   = 'rgba(0, 255, 231, 0.08)';
+const _DEBUG_COLLIDER_OK  = 'rgba(0, 255, 100, 0.55)';
+const _DEBUG_COLLIDER_HIT = 'rgba(255, 50, 50, 0.90)';
+const _CROSSHAIR_AMBER    = 'rgba(255, 196, 0, 0.85)';
 
 export class RenderSystem {
   /**
@@ -579,13 +795,22 @@ export class RenderSystem {
    * @param {boolean} [opts.debugWireframe=false]
    * @param {import('../physics/spatial_hash.js').SpatialHashGrid|null} [opts.grid]
    * @param {import('../core/viewport.js').Viewport|null} [opts.viewport]
+   * @param {import('../combat/projectile_pool.js').ProjectilePool|null} [opts.projectilePool]
+   * @param {import('../fx/particle_pool.js').ParticlePool|null} [opts.particlePool]
    */
-  constructor({ debugWireframe = false, grid = null, viewport = null } = {}) {
+  constructor({
+    debugWireframe = false,
+    grid           = null,
+    viewport       = null,
+    projectilePool = null,
+    particlePool   = null,
+  } = {}) {
     this.debugWireframe = debugWireframe;
-    this.grid     = grid;
-    this.viewport = viewport;
+    this.grid           = grid;
+    this.viewport       = viewport;
+    this.projectilePool = projectilePool;
+    this.particlePool   = particlePool;
 
-    // Crosshair animation rotation
     this._crosshairSpin = 0;
   }
 
@@ -594,20 +819,20 @@ export class RenderSystem {
   }
 
   render(entities, ctx, alpha) {
-    // Optional spatial grid debug overlay
+    // 1. Optional spatial grid debug overlay
     if (this.debugWireframe && this.grid && this.viewport) {
       this._drawGrid(ctx);
     }
 
     let activeManualPlayer = null;
 
+    // 2. Render all entities
     for (const entity of entities) {
-      const tf  = entity.get(TransformComponent);
-      const rc  = entity.get(RenderComponent);
+      const tf = entity.get(TransformComponent);
+      const rc = entity.get(RenderComponent);
 
       if (!rc.visible || rc.alpha <= 0) continue;
 
-      // Check if entity is player controller
       const playerCtrl = entity.get(PlayerControllerComponent);
       if (playerCtrl?.isManualControlled) {
         activeManualPlayer = { tf, ctrl: playerCtrl };
@@ -644,7 +869,7 @@ export class RenderSystem {
         ctx.shadowBlur = 0;
       }
 
-      // Color — lerp towards white on flash
+      // Color lerp
       ctx.fillStyle   = isFlashing ? this._lerpColor(rc.color, '#ffffff', flashT * 0.7) : rc.color;
       ctx.strokeStyle = ctx.fillStyle;
       ctx.lineWidth   = 1.2;
@@ -686,75 +911,149 @@ export class RenderSystem {
       }
     }
 
-    // Render interactive targeting crosshair when in Manual Pilot mode
+    // 3. Render active projectiles
+    if (this.projectilePool) {
+      this._drawProjectiles(ctx);
+    }
+
+    // 4. Render additive particle FX
+    if (this.particlePool) {
+      this._drawParticles(ctx);
+    }
+
+    // 5. Render interactive targeting crosshair
     if (activeManualPlayer && this.viewport) {
       this._crosshairSpin += 0.025;
       this._drawCrosshair(ctx, activeManualPlayer.ctrl.cursorPosition, activeManualPlayer.tf.position);
     }
   }
 
+  // ── Projectile Drawing ────────────────────────────────────
+
+  _drawProjectiles(ctx) {
+    this.projectilePool.forEachActive(p => {
+      ctx.save();
+      ctx.shadowBlur  = 12;
+      ctx.shadowColor = p.color;
+      ctx.fillStyle   = p.color;
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth   = 1;
+
+      const speed = Math.sqrt(p.vx * p.vx + p.vy * p.vy) || 1;
+      const nx = p.vx / speed;
+      const ny = p.vy / speed;
+      const len = Math.max(7, p.radius * 3.2);
+
+      // Trailing laser core line
+      ctx.beginPath();
+      ctx.moveTo(p.x + nx * p.radius, p.y + ny * p.radius);
+      ctx.lineTo(p.x - nx * len, p.y - ny * len);
+      ctx.stroke();
+
+      // Front head bead
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.restore();
+    });
+  }
+
+  // ── Additive Particle FX Drawing ──────────────────────────
+
+  _drawParticles(ctx) {
+    ctx.save();
+    // Hardware-accelerated additive neon blooms!
+    ctx.globalCompositeOperation = 'lighter';
+
+    const pool = this.particlePool.pool;
+    const len  = this.particlePool.maxCapacity;
+
+    for (let i = 0; i < len; i++) {
+      const pt = pool[i];
+      if (!pt.active || pt.alpha <= 0) continue;
+
+      ctx.globalAlpha = pt.alpha;
+      ctx.fillStyle   = pt.color;
+      ctx.shadowColor = pt.color;
+      ctx.shadowBlur  = 8;
+
+      if (pt.shape === 'ring') {
+        ctx.strokeStyle = pt.color;
+        ctx.lineWidth   = 2.2;
+        ctx.beginPath();
+        ctx.arc(pt.x, pt.y, Math.max(0.1, pt.size), 0, Math.PI * 2);
+        ctx.stroke();
+      } else if (pt.shape === 'spark') {
+        const speed = Math.sqrt(pt.vx * pt.vx + pt.vy * pt.vy) || 1;
+        const tailLen = Math.min(18, speed * 0.08);
+        ctx.strokeStyle = pt.color;
+        ctx.lineWidth   = pt.size * 0.85;
+        ctx.beginPath();
+        ctx.moveTo(pt.x, pt.y);
+        ctx.lineTo(pt.x - (pt.vx / speed) * tailLen, pt.y - (pt.vy / speed) * tailLen);
+        ctx.stroke();
+      } else {
+        ctx.beginPath();
+        ctx.arc(pt.x, pt.y, Math.max(0.1, pt.size), 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    // Always reset to standard composite mode
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.restore();
+  }
+
   // ── Ship Sprite Path Builders ─────────────────────────────
 
-  /**
-   * Sleek aerodynamic arrowhead (Blue swarm flocker).
-   */
   _drawArrowhead(ctx, sz) {
-    ctx.moveTo(sz * 1.5,  0);          // front nose
-    ctx.lineTo(-sz * 0.85, sz * 0.75); // bottom wingtip
-    ctx.lineTo(-sz * 0.35, 0);         // center rear engine cavity
-    ctx.lineTo(-sz * 0.85, -sz * 0.75); // top wingtip
+    ctx.moveTo(sz * 1.5,  0);
+    ctx.lineTo(-sz * 0.85, sz * 0.75);
+    ctx.lineTo(-sz * 0.35, 0);
+    ctx.lineTo(-sz * 0.85, -sz * 0.75);
   }
 
-  /**
-   * Aggressive spiked diamond with menacing barb fins (Crimson hunter).
-   */
   _drawSpikedDiamond(ctx, sz) {
-    ctx.moveTo(sz * 1.7,  0);          // sharp front beak
-    ctx.lineTo(sz * 0.2,  sz * 0.5);   // mid flank
-    ctx.lineTo(-sz * 0.2, sz * 1.25);  // razor barb wingtip
-    ctx.lineTo(-sz * 0.5, sz * 0.35);  // inner waist
-    ctx.lineTo(-sz * 1.3, 0);          // tail stinger
-    ctx.lineTo(-sz * 0.5, -sz * 0.35); // inner waist
-    ctx.lineTo(-sz * 0.2, -sz * 1.25); // razor barb wingtip
-    ctx.lineTo(sz * 0.2,  -sz * 0.5);  // mid flank
+    ctx.moveTo(sz * 1.7,  0);
+    ctx.lineTo(sz * 0.2,  sz * 0.5);
+    ctx.lineTo(-sz * 0.2, sz * 1.25);
+    ctx.lineTo(-sz * 0.5, sz * 0.35);
+    ctx.lineTo(-sz * 1.3, 0);
+    ctx.lineTo(-sz * 0.5, -sz * 0.35);
+    ctx.lineTo(-sz * 0.2, -sz * 1.25);
+    ctx.lineTo(sz * 0.2,  -sz * 0.5);
   }
 
-  /**
-   * Dual-engine heavy flagship / fighter (Player flagship).
-   */
   _drawFlagship(ctx, sz) {
-    ctx.moveTo(sz * 1.9,  0);           // cockpit nose
-    ctx.lineTo(sz * 0.9,  sz * 0.4);   // canopy shoulder
-    ctx.lineTo(-sz * 0.1, sz * 1.4);   // main wing tip
-    ctx.lineTo(-sz * 0.6, sz * 1.15);  // wing trailing
-    ctx.lineTo(-sz * 0.5, sz * 0.5);   // right nacelle outer
-    ctx.lineTo(-sz * 1.2, sz * 0.5);   // right nozzle outer
-    ctx.lineTo(-sz * 1.2, sz * 0.2);   // right nozzle inner
-    ctx.lineTo(-sz * 0.8, 0);          // fuselage center keel
-    ctx.lineTo(-sz * 1.2, -sz * 0.2);  // left nozzle inner
-    ctx.lineTo(-sz * 1.2, -sz * 0.5);  // left nozzle outer
-    ctx.lineTo(-sz * 0.5, -sz * 0.5);  // left nacelle outer
-    ctx.lineTo(-sz * 0.6, -sz * 1.15); // left wing trailing
-    ctx.lineTo(-sz * 0.1, -sz * 1.4);  // left wing tip
-    ctx.lineTo(sz * 0.9,  -sz * 0.4);  // canopy shoulder
+    ctx.moveTo(sz * 1.9,  0);
+    ctx.lineTo(sz * 0.9,  sz * 0.4);
+    ctx.lineTo(-sz * 0.1, sz * 1.4);
+    ctx.lineTo(-sz * 0.6, sz * 1.15);
+    ctx.lineTo(-sz * 0.5, sz * 0.5);
+    ctx.lineTo(-sz * 1.2, sz * 0.5);
+    ctx.lineTo(-sz * 1.2, sz * 0.2);
+    ctx.lineTo(-sz * 0.8, 0);
+    ctx.lineTo(-sz * 1.2, -sz * 0.2);
+    ctx.lineTo(-sz * 1.2, -sz * 0.5);
+    ctx.lineTo(-sz * 0.5, -sz * 0.5);
+    ctx.lineTo(-sz * 0.6, -sz * 1.15);
+    ctx.lineTo(-sz * 0.1, -sz * 1.4);
+    ctx.lineTo(sz * 0.9,  -sz * 0.4);
   }
 
-  /**
-   * Twin exhaust flames behind flagship engines.
-   */
   _drawThrusterFlames(ctx, sz, power) {
     if (power <= 0.05) return;
 
     const flicker = 0.8 + Math.random() * 0.4;
     const flameLen = sz * (1.2 + power * 1.8) * flicker;
-    const flameWidth = sz * 0.22;
 
     ctx.save();
     ctx.shadowBlur = 15;
     ctx.shadowColor = '#00ffe7';
     ctx.fillStyle = '#00ffe7';
 
-    // Right engine flame
+    // Right flame
     ctx.beginPath();
     ctx.moveTo(-sz * 1.2, sz * 0.48);
     ctx.lineTo(-sz * 1.2 - flameLen, sz * 0.35);
@@ -762,7 +1061,7 @@ export class RenderSystem {
     ctx.closePath();
     ctx.fill();
 
-    // Left engine flame
+    // Left flame
     ctx.beginPath();
     ctx.moveTo(-sz * 1.2, -0.22);
     ctx.lineTo(-sz * 1.2 - flameLen, -sz * 0.35);
@@ -770,7 +1069,7 @@ export class RenderSystem {
     ctx.closePath();
     ctx.fill();
 
-    // Inner bright white flame core
+    // Inner white core
     ctx.fillStyle = '#ffffff';
     ctx.beginPath();
     ctx.moveTo(-sz * 1.2, sz * 0.42);
@@ -789,9 +1088,6 @@ export class RenderSystem {
     ctx.restore();
   }
 
-  /**
-   * Draw interactive targeting crosshair at mouse coordinates.
-   */
   _drawCrosshair(ctx, cursor, shipPos) {
     const cx = cursor.x;
     const cy = cursor.y;
@@ -814,7 +1110,7 @@ export class RenderSystem {
     ctx.stroke();
     ctx.restore();
 
-    // Rotating outer reticle brackets
+    // Rotating outer reticle
     ctx.save();
     ctx.translate(cx, cy);
     ctx.rotate(this._crosshairSpin);
@@ -828,7 +1124,6 @@ export class RenderSystem {
       ctx.stroke();
     }
 
-    // Tick markers
     const tStart = 19;
     const tEnd   = 24;
     for (let i = 0; i < 4; i++) {
@@ -847,8 +1142,6 @@ export class RenderSystem {
 
     ctx.restore();
   }
-
-  // ── Primitives & Helpers ──────────────────────────────────
 
   _drawTriangle(ctx, sz) {
     ctx.moveTo( sz * 1.4,  0);
@@ -968,7 +1261,6 @@ export class WanderSystem {
       const rb = entity.get(RigidBodyComponent);
       if (rb?.isStatic) continue;
 
-      // Entities with BoidComponent have their own steering
       if (entity.has(BoidComponent)) continue;
 
       state.wanderTimer -= dt;

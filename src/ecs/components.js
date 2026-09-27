@@ -1,6 +1,6 @@
 /**
  * @file components.js
- * @description Core ECS components for NovaPulse (Phase 1, 2, & 3).
+ * @description Core ECS components for NovaPulse (Phase 1, 2, 3, & 4).
  *
  * Components are plain data containers — no methods beyond a simple reset().
  * All numeric fields use typed-array-friendly primitives for future
@@ -19,6 +19,9 @@
  *  - BoidComponent        — flockType, perceptionRadius, separationRadius, maxForce, maxSpeed
  *  - PlayerControllerComponent — thrustForce, turnRate, damping, isManualControlled
  *  - CombatStateComponent — health, maxHealth, energy, isTargeted
+ *  Phase 4:
+ *  - WeaponComponent      — fireRate, cooldown, projectileSpeed, damage, spread, heat
+ *  - AudioSourceComponent — active, soundQueue
  */
 
 import { Vec2 } from '../core/math.js';
@@ -334,6 +337,9 @@ export class PlayerControllerComponent {
 
     /** Thruster flame particle intensity [0..1] */
     this.thrusterActive = 0;
+
+    /** Continuous firing flag (Mouse Left-Click or Space) */
+    this.firingPrimary = false;
   }
 }
 
@@ -376,4 +382,93 @@ export class CombatStateComponent {
     this.health = Math.min(this.maxHealth, this.health + amount);
   }
 }
+
+// ─────────────────────────────────────────────────────────────
+//  WeaponComponent  (Phase 4)
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * Projectile weapon configuration, cooldown, and heat state.
+ */
+export class WeaponComponent {
+  /**
+   * @param {object} [opts]
+   * @param {number}  [opts.fireRate=7]           - Rounds per second
+   * @param {number}  [opts.projectileSpeed=480]  - Velocity in px/s
+   * @param {number}  [opts.damage=25]            - Hit damage points
+   * @param {number}  [opts.spread=0.03]          - Random spread angle in radians
+   * @param {number}  [opts.heatPerShot=8]        - Heat added per firing cycle
+   * @param {number}  [opts.maxHeat=100]          - Heat limit before overheat lock
+   * @param {number}  [opts.coolingRate=35]       - Heat dissipation rate per second
+   * @param {number}  [opts.ttl=1.5]              - Projectile lifetime in seconds
+   * @param {string}  [opts.color='#00ffe7']      - Projectile neon color
+   */
+  constructor({
+    fireRate        = 7,
+    projectileSpeed = 480,
+    damage          = 25,
+    spread          = 0.03,
+    heatPerShot     = 8,
+    maxHeat         = 100,
+    coolingRate     = 35,
+    ttl             = 1.5,
+    color           = '#00ffe7',
+  } = {}) {
+    this.fireRate        = fireRate;
+    this.projectileSpeed = projectileSpeed;
+    this.damage          = damage;
+    this.spread          = spread;
+    this.heatPerShot     = heatPerShot;
+    this.maxHeat         = maxHeat;
+    this.coolingRate     = coolingRate;
+    this.ttl             = ttl;
+    this.color           = color;
+
+    this.cooldown        = 0;
+    this.heat            = 0;
+    this.isOverheated    = false;
+  }
+
+  update(dt) {
+    if (this.cooldown > 0) {
+      this.cooldown = Math.max(0, this.cooldown - dt);
+    }
+
+    if (this.heat > 0) {
+      this.heat = Math.max(0, this.heat - this.coolingRate * dt);
+      if (this.isOverheated && this.heat <= this.maxHeat * 0.25) {
+        this.isOverheated = false;
+      }
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+//  AudioSourceComponent  (Phase 4)
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * Queue for triggering procedural sound events from ECS systems.
+ */
+export class AudioSourceComponent {
+  /**
+   * @param {object} [opts]
+   * @param {boolean} [opts.active=true]
+   */
+  constructor({ active = true } = {}) {
+    this.active     = active;
+    this.soundQueue = [];
+  }
+
+  enqueue(soundName, ...args) {
+    this.soundQueue.push({ soundName, args });
+  }
+
+  flush() {
+    const list = this.soundQueue.slice();
+    this.soundQueue.length = 0;
+    return list;
+  }
+}
+
 

@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>NovaPulse — Autonomous Swarm & Flight Simulation</title>
+  <title>NovaPulse — Autonomous Swarm, Plasma Weapons & Audio Synth</title>
   <style>
     /* ── Reset ──────────────────────────────────────────── */
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -15,8 +15,8 @@
       --blue:       #00cfff;
       --amber:      #ffc400;
       --green:      #00ff88;
-      --dim:        #080811;
-      --hud-bg:     rgba(4, 4, 15, 0.72);
+      --dim:        #06060e;
+      --hud-bg:     rgba(4, 4, 15, 0.74);
       --hud-border: rgba(0, 255, 231, 0.16);
       --font:       'Courier New', Courier, monospace;
     }
@@ -93,10 +93,10 @@
       align-items: center;
       justify-content: center;
       font-family: var(--font);
-      font-size: 10.5px;
+      font-size: 10px;
       font-weight: bold;
       letter-spacing: 0.18em;
-      padding: 6px 12px;
+      padding: 5px 11px;
       border-radius: 3px;
       text-transform: uppercase;
       transition: all 0.25s ease;
@@ -129,10 +129,10 @@
       background: var(--hud-bg);
       border: 1px solid var(--hud-border);
       border-radius: 3px;
-      padding: 8px 13px;
+      padding: 8px 12px;
       backdrop-filter: blur(8px);
       -webkit-backdrop-filter: blur(8px);
-      min-width: 236px;
+      min-width: 242px;
     }
 
     .hud-title {
@@ -151,13 +151,13 @@
       justify-content: space-between;
       align-items: baseline;
       font-family: var(--font);
-      font-size: 10px;
-      color: rgba(255, 255, 255, 0.46);
+      font-size: 9.5px;
+      color: rgba(255, 255, 255, 0.48);
       padding: 1px 0;
     }
 
     .hud-row span.val {
-      font-size: 12px;
+      font-size: 11.5px;
       font-weight: bold;
       letter-spacing: 0.04em;
       color: var(--cyan);
@@ -166,6 +166,26 @@
     .hud-row span.val.blue    { color: var(--blue);    }
     .hud-row span.val.amber   { color: var(--amber);   }
     .hud-row span.val.green   { color: var(--green);   }
+
+    /* ── Gauge Bars ─────────────────────────────────────── */
+    .bar-wrap {
+      width: 100%;
+      height: 4px;
+      background: rgba(255, 255, 255, 0.08);
+      border-radius: 2px;
+      margin: 1px 0 4px 0;
+      overflow: hidden;
+    }
+
+    .bar-fill {
+      height: 100%;
+      width: 100%;
+      transition: width 0.08s ease-out;
+    }
+    .bar-fill.shield { background: var(--cyan); box-shadow: 0 0 6px var(--cyan); }
+    .bar-fill.energy { background: var(--blue); box-shadow: 0 0 6px var(--blue); }
+    .bar-fill.heat   { background: var(--amber); box-shadow: 0 0 6px var(--amber); }
+    .bar-fill.heat.overheated { background: var(--crimson); box-shadow: 0 0 8px var(--crimson); }
 
     /* ── Separator ──────────────────────────────────────── */
     .hud-sep {
@@ -179,7 +199,7 @@
       font-family: var(--font);
       font-size: 8.5px;
       color: rgba(255, 255, 255, 0.32);
-      line-height: 1.7;
+      line-height: 1.65;
     }
 
     .hud-hotkeys kbd {
@@ -250,12 +270,44 @@
     <!-- Mode Badge -->
     <div class="mode-badge auto" id="hud-mode-badge">[AUTO SWARM SIMULATION]</div>
 
-    <!-- Panel 1: Flight Telemetry & Combat -->
+    <!-- Panel 1: Player Ship Status -->
     <div class="hud-panel">
-      <div class="hud-title">■ Flight Telemetry & Combat</div>
+      <div class="hud-title">■ Flagship Status</div>
       <div class="hud-row">
-        <span>FLAGSHIP VELOCITY</span>
+        <span>SHIELD / HULL</span>
+        <span class="val green" id="hud-hp-val">100%</span>
+      </div>
+      <div class="bar-wrap">
+        <div class="bar-fill shield" id="hud-hp-bar" style="width: 100%;"></div>
+      </div>
+
+      <div class="hud-row">
+        <span>CAPACITOR</span>
+        <span class="val blue" id="hud-energy-val">100%</span>
+      </div>
+      <div class="bar-wrap">
+        <div class="bar-fill energy" id="hud-energy-bar" style="width: 100%;"></div>
+      </div>
+
+      <div class="hud-row">
+        <span>CANNON HEAT</span>
+        <span class="val amber" id="hud-heat-val">0%</span>
+      </div>
+      <div class="bar-wrap">
+        <div class="bar-fill heat" id="hud-heat-bar" style="width: 0%;"></div>
+      </div>
+    </div>
+
+    <!-- Panel 2: Flight Telemetry & Combat -->
+    <div class="hud-panel">
+      <div class="hud-title">▸ Flight Telemetry & Combat</div>
+      <div class="hud-row">
+        <span>VELOCITY</span>
         <span class="val amber" id="hud-velocity">0.0 px/s</span>
+      </div>
+      <div class="hud-row">
+        <span>ENEMIES DESTROYED</span>
+        <span class="val crimson" id="hud-destroyed">0</span>
       </div>
       <div class="hud-row">
         <span>ACTIVE SWARM</span>
@@ -271,9 +323,22 @@
       </div>
     </div>
 
-    <!-- Panel 2: Engine Performance -->
+    <!-- Panel 3: Object Pools & Diagnostics -->
     <div class="hud-panel">
-      <div class="hud-title">▸ Engine Performance</div>
+      <div class="hud-title">⬡ Pools & Performance</div>
+      <div class="hud-row">
+        <span>PROJECTILES (POOL 400)</span>
+        <span class="val cyan" id="hud-projectiles">0</span>
+      </div>
+      <div class="hud-row">
+        <span>PARTICLES (POOL 800)</span>
+        <span class="val amber" id="hud-particles">0</span>
+      </div>
+      <div class="hud-row">
+        <span>AUDIO SYNTH</span>
+        <span class="val green" id="hud-audio-status">[ACTIVE]</span>
+      </div>
+      <div class="hud-sep"></div>
       <div class="hud-row">
         <span>FPS</span>
         <span class="val" id="hud-fps">—</span>
@@ -282,43 +347,20 @@
         <span>TICK ms</span>
         <span class="val" id="hud-tick">—</span>
       </div>
-      <div class="hud-row">
-        <span>TOTAL ENTITIES</span>
-        <span class="val" id="hud-entities">—</span>
-      </div>
-      <div class="hud-row">
-        <span>SIM TIME</span>
-        <span class="val" id="hud-simtime">—</span>
-      </div>
-    </div>
-
-    <!-- Panel 3: Spatial Diagnostics -->
-    <div class="hud-panel">
-      <div class="hud-title">⬡ Spatial Collision</div>
-      <div class="hud-row">
-        <span>GRID CELLS</span>
-        <span class="val green" id="hud-grid-cells">—</span>
-      </div>
-      <div class="hud-row">
-        <span>BROADPHASE PAIRS</span>
-        <span class="val amber" id="hud-bp-pairs">—</span>
-      </div>
-      <div class="hud-row">
-        <span>PRUNED PAIRS</span>
-        <span class="val green" id="hud-pruned">—</span>
-      </div>
     </div>
 
     <!-- Panel 4: Hotkey Controls -->
     <div class="hud-panel">
       <div class="hud-title">⌨ Controls</div>
       <div class="hud-hotkeys">
-        <div><kbd>M</kbd> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Toggle Manual Flight / Auto</div>
-        <div><kbd>WASD/▲▼</kbd> &nbsp;Inertial Thrusters</div>
-        <div><kbd>Mouse</kbd> &nbsp;&nbsp;&nbsp;Aim / Target Heading</div>
-        <div><kbd>B</kbd> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Toggle Wireframes</div>
-        <div><kbd>Space</kbd> &nbsp;&nbsp;&nbsp;Pause / Resume</div>
-        <div><kbd>R</kbd> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Reset Simulation</div>
+        <div><kbd>Left Click / Space</kbd> &nbsp;Dual Plasma Cannons</div>
+        <div><kbd>WASD / Arrows</kbd> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Inertial Thrusters</div>
+        <div><kbd>Mouse</kbd> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Aim Heading / Crosshair</div>
+        <div><kbd>M</kbd> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Toggle Manual Flight / Auto</div>
+        <div><kbd>X</kbd> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Toggle Sound FX (Mute)</div>
+        <div><kbd>P</kbd> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Pause / Resume Simulation</div>
+        <div><kbd>B</kbd> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Toggle Wireframes</div>
+        <div><kbd>R</kbd> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Reset Simulation</div>
       </div>
     </div>
 
@@ -330,7 +372,7 @@
   </div>
 
   <!-- Engine watermark -->
-  <div id="engine-badge">NOVAPULSE v3.0 · Phase 3 · Autonomous Swarm & Pilot</div>
+  <div id="engine-badge">NOVAPULSE v4.0 · Phase 4 · Weapons, FX & Audio Synth</div>
 
   <!-- Entrypoint (ES module) -->
   <script type="module" src="src/main.js"></script>

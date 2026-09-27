@@ -5,7 +5,8 @@
   "type": "module",
   "main": "src/main.js",
   "scripts": {
-    "start": "npx serve . -p 3000",
+    "start": "node server.js",
+    "serve": "python -m http.server 3000",
     "test": "node tests/engine.test.js"
   },
   "keywords": ["simulation", "canvas", "swarm", "ecs", "game-engine"],
