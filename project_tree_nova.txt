@@ -1,0 +1,40 @@
+nova_pulse/
+├── src
+│   ├── ai
+│   │   ├── behaviors.js
+│   │   ├── steering.js
+│   │   └── wave_director.js
+│   ├── audio
+│   │   └── sound_synth.js
+│   ├── combat
+│   │   ├── projectile_pool.js
+│   │   └── weapons.js
+│   ├── core
+│   │   ├── events.js
+│   │   ├── loop.js
+│   │   ├── math.js
+│   │   └── viewport.js
+│   ├── ecs
+│   │   ├── components.js
+│   │   ├── entity.js
+│   │   ├── systems.js
+│   │   └── world.js
+│   ├── environment
+│   │   └── arena.js
+│   ├── fx
+│   │   └── particle_pool.js
+│   ├── physics
+│   │   ├── colliders.js
+│   │   ├── narrowphase.js
+│   │   ├── resolver.js
+│   │   └── spatial_hash.js
+│   └── main.js
+├── tests
+│   ├── scratch
+│   │   └── debug_resolver.js
+│   └── engine.test.js
+├── .gitignore
+├── CHANGELOG.md
+├── index.html
+├── package.json
+└── server.js

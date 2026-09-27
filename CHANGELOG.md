@@ -1,5 +1,20 @@
 # Changelog
 
+### [2026-09-27 23:27 IST] feat(engine): finalize NovaPulse swarm simulation and audio engine
+
+#### Key Highlights
+- Implemented procedural wave director for dynamic survival gameplay.
+- Integrated zero-allocation procedural audio synthesizer using WebAudio API.
+- Added high-performance object pooling for projectiles and particle effects.
+- Enhanced ECS architecture with dynamic arena hazards and spatial partitioning.
+- Refined steering behaviors and combat systems for high-load simulation scenarios.
+
+#### Files Modified
+.gitignore, CHANGELOG.md, index.html, package.json, server.js, src/ai/behaviors.js, src/ai/steering.js, src/ai/wave_director.js, src/audio/sound_synth.js, src/combat/projectile_pool.js
+
+#### Functional & Architectural Impact
+The NovaPulse engine has reached full operational status as a high-performance 2D simulation platform. By introducing object pooling and a procedural audio synthesizer, the engine now maintains stable frame rates under heavy combat loads while providing immersive feedback. The transition to a custom Node.js server and refined ECS component architecture ensures a robust, scalable foundation for future behavioral research and simulation complexity.
+
 ### [2026-09-27 08:55 IST] feat(engine): finalize NovaPulse swarm simulation and audio engine
 
 #### Key Highlights
